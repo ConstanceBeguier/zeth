@@ -1,0 +1,15 @@
+{
+  "extends": "solhint:recommended",
+  "rules": {
+    "compiler-version": ["error", "^0.8.34"],
+    "func-visibility": ["warn", { "ignoreConstructors": true }],
+    "import-path-check": "off",
+    "use-natspec": "off",
+    "func-name-mixedcase": "off",
+    "no-console": "off",
+    "one-contract-per-file": "off",
+    "gas-custom-errors": "off",
+    "gas-small-strings": "off",
+    "reason-string": "off"
+  }
+}

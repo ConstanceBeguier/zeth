@@ -8,25 +8,33 @@ import {Test} from "forge-std/Test.sol";
 // use the same syntax and offer the same functionality.
 
 contract CounterTest is Test {
-    Counter counter;
+    Counter internal counter;
 
     function setUp() public {
         counter = new Counter();
     }
 
     function test_InitialValue() public view {
-        require(counter.x() == 0, "Initial value should be 0");
+        assertEq(counter.x(), 0);
     }
 
     function testFuzz_Inc(uint8 x) public {
-        for (uint8 i = 0; i < x; i++) {
+        for (uint8 i = 0; i < x; ++i) {
             counter.inc();
         }
-        require(counter.x() == x, "Value after calling inc x times should be x");
+        assertEq(counter.x(), x);
+    }
+
+    function test_IncBy(uint256 by) public {
+        by = bound(by, 1, type(uint128).max);
+        vm.expectEmit(true, false, false, false, address(counter));
+        emit Counter.Increment(by);
+        counter.incBy(by);
+        assertEq(counter.x(), by);
     }
 
     function test_IncByZero() public {
-        vm.expectRevert();
+        vm.expectRevert(Counter.ZeroIncrement.selector);
         counter.incBy(0);
     }
 }

@@ -43,8 +43,12 @@ jobs:
 
       - run: npm ci
 
-      - name: Solhint
-        run: npm run lint:sol
+      - name: Solhint (contracts)
+        run: npm run lint:sol:src
+
+      - name: Solhint (tests)
+        if: ${{ !cancelled() }}
+        run: npm run lint:sol:test
 
       - name: Prettier
         if: ${{ !cancelled() }}
@@ -142,9 +146,12 @@ jobs:
       - name: Install Slither
         run: pip install "slither-analyzer==${SLITHER_VERSION}"
 
+      - name: Compile
+        run: npm run compile
+
       - name: Run Slither
         # Configuration (filtered paths, failure level) lives in backend/slither.config.json
-        run: slither . --sarif slither.sarif
+        run: slither . --ignore-compile --sarif slither.sarif
 
       - name: Upload SARIF to GitHub code scanning
         if: always() && hashFiles('backend/slither.sarif') != ''
