@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secret
+secrets.json
+
+# Hardhat
+artifacts/
+cache/
+coverage/
+coverage.json
+typechain-types/
+
+# Hardhat 3 build outputs
+ignition/deployments/
+
+# TypeScript
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Testing
+.nyc_output/
+
+# ZK circuits generated files
+*.r1cs
+*.wtns
+*.sym
+*.ptau
+*.zkey
+*.witness
+verification_key.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
