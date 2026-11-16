@@ -1,0 +1,156 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: backend
+
+env:
+  NODE_VERSION: "22"
+  SLITHER_VERSION: "0.11.6"
+  MIN_LINE_COVERAGE: "80"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - name: Solhint
+        run: npm run lint:sol
+
+      - name: Prettier
+        if: ${{ !cancelled() }}
+        run: npm run format:check
+
+      - name: Compile
+        if: ${{ !cancelled() }}
+        run: npm run compile
+
+      - name: Typecheck
+        if: ${{ !cancelled() }}
+        run: npm run typecheck
+
+  test:
+    name: Test & coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run coverage
+
+      - name: Check coverage threshold
+        run: |
+          read -r hit found < <(awk -F: '/^LH:/{h+=$2} /^LF:/{f+=$2} END{print h+0, f+0}' coverage/lcov.info)
+          if [ "$found" -eq 0 ]; then echo "No lines found in lcov.info"; exit 1; fi
+          pct=$(awk -v h="$hit" -v f="$found" 'BEGIN{printf "%.2f", 100*h/f}')
+          {
+            echo "### Solidity coverage"
+            echo ""
+            echo "| Lines hit | Lines total | Coverage | Threshold |"
+            echo "|---|---|---|---|"
+            echo "| $hit | $found | **$pct%** | $MIN_LINE_COVERAGE% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Line coverage: $pct% (min $MIN_LINE_COVERAGE%)"
+          awk -v p="$pct" -v m="$MIN_LINE_COVERAGE" 'BEGIN{exit !(p+0 >= m+0)}' \
+            || { echo "::error::Line coverage $pct% is below $MIN_LINE_COVERAGE%"; exit 1; }
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            backend/coverage/lcov.info
+            backend/coverage/html
+          if-no-files-found: ignore
+
+  contract-size:
+    name: Contract size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - name: Check EIP-170 / EIP-3860 limits (production profile)
+        run: npm run size
+
+  slither:
+    name: Slither
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: npm ci
+
+      - name: Install Slither
+        run: pip install "slither-analyzer==${SLITHER_VERSION}"
+
+      - name: Run Slither
+        # Configuration (filtered paths, failure level) lives in backend/slither.config.json
+        run: slither . --sarif slither.sarif
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always() && hashFiles('backend/slither.sarif') != ''
+        # Code scanning requires a public repo or GitHub Advanced Security
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: backend/slither.sarif
+          category: slither
