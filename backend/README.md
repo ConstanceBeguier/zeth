@@ -13,6 +13,14 @@ This example project includes:
 - TypeScript integration tests using `mocha` and ethers.js
 - Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
 
+## Supported tokens
+
+A `ShieldedPool` accepts a single ERC-20 token, fixed at deployment. Only standard ERC-20 tokens are supported (e.g. DAI, WETH):
+
+- **Fee-on-transfer tokens** are rejected: `shield` checks that the pool received exactly the deposited amount.
+- **Tokens that can enable a fee later** (e.g. USDT) and **rebasing tokens** (e.g. stETH, whose balances change without a transfer) are not supported. The pool could end up holding fewer tokens than the total value of its notes, and the last notes could never be unshielded. `unshield` does not check the amount that leaves the pool: if it reverted instead, the funds would be stuck anyway.
+- **Tokens with transfer hooks** (ERC-777) are not supported.
+
 ## Usage
 
 ### Running Tests

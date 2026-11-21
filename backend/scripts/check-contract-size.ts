@@ -49,6 +49,8 @@ const rows: Row[] = findArtifacts(ARTIFACTS_DIR)
   .map((file) => JSON.parse(readFileSync(file, "utf8")) as Artifact)
   // Skip Solidity test contracts and abstract contracts/interfaces (no bytecode)
   .filter((a) => !a.sourceName.endsWith(".t.sol"))
+  // Skip test-only contracts, which are never deployed in production
+  .filter((a) => !a.sourceName.startsWith("contracts/mocks/"))
   .filter((a) => byteLength(a.deployedBytecode) > 0)
   .map((a) => ({
     name: `${a.sourceName}:${a.contractName}`,

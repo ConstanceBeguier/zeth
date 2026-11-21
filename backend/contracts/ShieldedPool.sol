@@ -10,6 +10,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @dev Step 1: everything is stored in clear and notes are owned by Ethereum addresses.
 ///      Commitments, nullifiers, the Merkle tree and the ZK proofs will replace these
 ///      pieces one by one.
+///
+///      Supported tokens: standard ERC-20 tokens only (e.g. DAI, WETH). Not supported:
+///      - fee-on-transfer tokens: rejected by `shield`, which checks the amount received;
+///      - tokens that can enable a fee later (e.g. USDT) or whose balances change without
+///        a transfer (rebasing tokens such as stETH): the pool could end up holding less
+///        than the total value of its notes, and the last notes could not be unshielded;
+///      - tokens with transfer hooks (ERC-777).
 contract ShieldedPool {
     using SafeERC20 for IERC20;
 
@@ -26,8 +33,11 @@ contract ShieldedPool {
     /// @notice Largest allowed note value (2^64 - 1)
     uint256 public constant MAX_VALUE = type(uint64).max;
 
+    // Upper case as required by solhint for immutables, which Slither flags
+    // slither-disable-start naming-convention
     /// @notice The only token accepted by this pool
     IERC20 public immutable TOKEN;
+    // slither-disable-end naming-convention
 
     /// @notice All notes ever created, by id
     mapping(uint256 id => Note note) public notes;
@@ -98,7 +108,10 @@ contract ShieldedPool {
         // 3. Transfer, then check that the pool received exactly `value`
         uint256 balanceBefore = TOKEN.balanceOf(address(this));
         TOKEN.safeTransferFrom(msg.sender, address(this), value);
-        if (TOKEN.balanceOf(address(this)) - balanceBefore != value) revert UnsupportedToken();
+        // Compared with an addition, not a subtraction: if the balance went down,
+        // `balanceAfter - balanceBefore` would underflow and revert with Panic(0x11)
+        uint256 balanceAfter = TOKEN.balanceOf(address(this));
+        if (balanceAfter != balanceBefore + value) revert UnsupportedToken();
 
         // 4. Emit events
         emit Shielded(msg.sender, owner, value);

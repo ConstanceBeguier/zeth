@@ -88,7 +88,13 @@ describe("ShieldedPool", function () {
     });
 
     it("Should revert without enough allowance", async function () {
-      await expect(pool.shield(alice.address, 1001n)).to.revert(ethers);
+      // Alice has 2000 tokens but only approved 1000: the allowance is the
+      // only thing that is missing
+      await token.mint(alice.address, 1000n);
+
+      await expect(
+        pool.shield(alice.address, 1001n),
+      ).to.be.revertedWithCustomError(token, "ERC20InsufficientAllowance");
     });
 
     it("Should reject a fee-on-transfer token", async function () {
@@ -237,6 +243,31 @@ describe("ShieldedPool", function () {
       await expect(
         pool.connect(alice).unshield(0n, alice.address, 100n),
       ).to.be.revertedWithCustomError(pool, "AlreadySpent");
+    });
+
+    it("Should unshield a note of value 0", async function () {
+      // Creates note 1 (50), then notes 2 (150) and 3 (0) from notes 0 and 1
+      await pool.connect(alice).shield(alice.address, 50n);
+      await pool
+        .connect(alice)
+        .privateTransfer([0n, 1n], [alice.address, alice.address], [150n, 0n]);
+
+      const tx = pool.connect(alice).unshield(3n, carol.address, 0n);
+
+      await expect(tx).to.emit(pool, "Unshielded").withArgs(carol.address, 0n);
+      await expect(tx).to.changeTokenBalances(
+        ethers,
+        token,
+        [pool, carol],
+        [0n, 0n],
+      );
+      expect((await pool.notes(3n)).spent).to.equal(true);
+    });
+
+    it("Should revert if the note does not exist", async function () {
+      await expect(
+        pool.connect(alice).unshield(42n, alice.address, 100n),
+      ).to.be.revertedWithCustomError(pool, "UnknownNote");
     });
 
     it("Should revert if the caller does not own the note", async function () {
