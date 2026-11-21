@@ -4,6 +4,13 @@ import { configVariable, defineConfig } from "hardhat/config";
 export default defineConfig({
   plugins: [hardhatToolboxMochaEthersPlugin],
   solidity: {
+    // Poseidon libraries are external (public functions): they need their own
+    // artifacts so they can be deployed and linked to the contracts using them
+    npmFilesToBuild: [
+      "poseidon-solidity/PoseidonT3.sol",
+      "poseidon-solidity/PoseidonT4.sol",
+      "poseidon-solidity/PoseidonT5.sol",
+    ],
     profiles: {
       default: {
         version: "0.8.34",
