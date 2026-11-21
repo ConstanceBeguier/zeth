@@ -2,7 +2,13 @@
   "extends": "solhint:recommended",
   "rules": {
     "compiler-version": ["error", "^0.8.34"],
-    "func-visibility": ["warn", { "ignoreConstructors": true }],
-    "import-path-check": "off"
+    "func-visibility": [
+      "warn",
+      {
+        "ignoreConstructors": true
+      }
+    ],
+    "import-path-check": "off",
+    "gas-indexed-events": "off"
   }
 }

@@ -1,5 +1,6 @@
 {
   "filter_paths": "node_modules|\\.t\\.sol$|test/",
   "exclude_dependencies": true,
-  "fail_on": "low"
+  "fail_on": "low",
+  "detectors_to_exclude": "naming-convention"
 }

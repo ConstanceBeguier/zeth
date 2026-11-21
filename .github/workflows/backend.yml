@@ -43,12 +43,8 @@ jobs:
 
       - run: npm ci
 
-      - name: Solhint (contracts)
-        run: npm run lint:sol:src
-
-      - name: Solhint (tests)
-        if: ${{ !cancelled() }}
-        run: npm run lint:sol:test
+      - name: Solhint
+        run: npm run lint:sol
 
       - name: Prettier
         if: ${{ !cancelled() }}
