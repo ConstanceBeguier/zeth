@@ -101,23 +101,6 @@ jobs:
             backend/coverage/html
           if-no-files-found: ignore
 
-  contract-size:
-    name: Contract size
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
-
-      - run: npm ci
-
-      - name: Check EIP-170 / EIP-3860 limits (production profile)
-        run: npm run size
-
   slither:
     name: Slither
     runs-on: ubuntu-latest

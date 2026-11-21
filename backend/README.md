@@ -9,8 +9,7 @@ To learn more about Hardhat 3, please visit the [Getting Started guide](https://
 This example project includes:
 
 - A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using `mocha` and ethers.js
+- TypeScript tests using `mocha` and ethers.js (there are no Solidity tests).
 - Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
 
 ## Supported tokens
@@ -29,13 +28,6 @@ To run all the tests in the project, execute the following command:
 
 ```shell
 npx hardhat test
-```
-
-You can also selectively run the Solidity or `mocha` tests:
-
-```shell
-npx hardhat test solidity
-npx hardhat test mocha
 ```
 
 ### Make a deployment to Sepolia

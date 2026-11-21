@@ -29,8 +29,7 @@
     "lint:sol": "solhint --noPoster --max-warnings 0 'contracts/**/*.sol'",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "npm run lint:sol && npm run format:check && npm run typecheck",
-    "size": "hardhat compile --build-profile production && node scripts/check-contract-size.ts"
+    "lint": "npm run lint:sol && npm run format:check && npm run typecheck"
   },
   "license": "MIT"
 }

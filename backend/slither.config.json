@@ -1,5 +1,5 @@
 {
-  "filter_paths": "node_modules|\\.t\\.sol$|test/",
+  "filter_paths": "node_modules",
   "exclude_dependencies": true,
   "fail_on": "low"
 }
