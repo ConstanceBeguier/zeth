@@ -32,12 +32,12 @@ npx hardhat test mocha
 
 ### Make a deployment to Sepolia
 
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
+This project includes an Ignition module, `ignition/modules/ShieldedPool.ts`, that deploys a test token (`MockERC20`, mintable by anyone) and a `ShieldedPool` for it. The same module is used locally and on Sepolia.
 
 To run the deployment to a local chain:
 
 ```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
+npx hardhat ignition deploy ignition/modules/ShieldedPool.ts
 ```
 
 To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
@@ -53,5 +53,5 @@ npx hardhat keystore set SEPOLIA_PRIVATE_KEY
 After setting the variable, you can run the deployment with the Sepolia network:
 
 ```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
+npx hardhat ignition deploy --network sepolia ignition/modules/ShieldedPool.ts
 ```
