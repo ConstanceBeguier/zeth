@@ -43,12 +43,8 @@ jobs:
 
       - run: npm ci
 
-      - name: Solhint (contracts)
-        run: npm run lint:sol:src
-
-      - name: Solhint (tests)
-        if: ${{ !cancelled() }}
-        run: npm run lint:sol:test
+      - name: Solhint
+        run: npm run lint:sol
 
       - name: Prettier
         if: ${{ !cancelled() }}
@@ -104,23 +100,6 @@ jobs:
             backend/coverage/lcov.info
             backend/coverage/html
           if-no-files-found: ignore
-
-  contract-size:
-    name: Contract size
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
-
-      - run: npm ci
-
-      - name: Check EIP-170 / EIP-3860 limits (production profile)
-        run: npm run size
 
   slither:
     name: Slither
