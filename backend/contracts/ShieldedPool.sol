@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {PoseidonT3} from "poseidon-solidity/PoseidonT3.sol";
+import {PoseidonT4} from "poseidon-solidity/PoseidonT4.sol";
 import {PoseidonT5} from "poseidon-solidity/PoseidonT5.sol";
 
 /// @title ShieldedPool
@@ -11,10 +12,12 @@ import {PoseidonT5} from "poseidon-solidity/PoseidonT5.sol";
 /// @notice Pool of notes for a single ERC-20 token.
 /// @dev A note (pk, value, nonce) is identified by its commitment
 ///      cm = Poseidon(DS_CMT, pk, value, nonce), where pk = Poseidon(DS_SK, sk) is the
-///      owner's public key. Spending a note requires its secret key sk.
+///      owner's public key. Spending a note requires its secret key sk and reveals its
+///      nullifier nf = Poseidon(DS_NF, cm, sk). A nullifier can only be revealed once,
+///      which prevents spending a note twice.
 ///      WARNING: for now sk, value and nonce are revealed in the transaction, so anyone
 ///      who sees them (e.g. in the mempool) can spend all the notes of that key. The ZK
-///      proofs will remove this. Nullifiers and the Merkle tree will also be added.
+///      proofs will remove this. The Merkle tree will also be added.
 ///
 ///      Supported tokens: standard ERC-20 tokens only (e.g. DAI, WETH). Not supported:
 ///      - fee-on-transfer tokens: rejected by `shield`, which checks the amount received;
@@ -58,6 +61,9 @@ contract ShieldedPool {
     /// @notice Domain separation tag for note commitments
     uint256 public constant DS_CMT = 2;
 
+    /// @notice Domain separation tag for nullifiers
+    uint256 public constant DS_NF = 3;
+
     // Upper case as required by solhint for immutables, which Slither flags
     // slither-disable-start naming-convention
     /// @notice The only token accepted by this pool
@@ -67,8 +73,8 @@ contract ShieldedPool {
     /// @notice Commitments of all notes ever created (spent or not)
     mapping(uint256 commitment => bool exists) public commitments;
 
-    /// @notice Commitments of the notes that have been spent
-    mapping(uint256 commitment => bool spent) public spentCommitments;
+    /// @notice Nullifiers of the notes that have been spent
+    mapping(uint256 nullifier => bool revealed) public nullifiers;
 
     /// @notice Emitted when a note is created
     /// @param commitment Commitment of the new note
@@ -78,8 +84,8 @@ contract ShieldedPool {
     event NoteCreated(uint256 indexed commitment, uint256 indexed pk, uint256 value, uint256 nonce);
 
     /// @notice Emitted when a note is spent
-    /// @param commitment Commitment of the spent note
-    event NoteSpent(uint256 indexed commitment);
+    /// @param nullifier Nullifier of the spent note
+    event NullifierRevealed(uint256 indexed nullifier);
 
     /// @notice Emitted when tokens enter the pool
     /// @param from Address the tokens come from
@@ -104,7 +110,7 @@ contract ShieldedPool {
     error InvalidValue();
     /// @notice No note has this commitment (wrong secret key, value or nonce)
     error UnknownNote();
-    /// @notice The note has already been spent
+    /// @notice The note has already been spent: its nullifier was already revealed
     error AlreadySpent();
     /// @notice The same note is used twice as an input
     error DuplicateInput();
@@ -170,9 +176,13 @@ contract ShieldedPool {
             computeCommitment(pk, inputs[0].value, inputs[0].nonce),
             computeCommitment(pk, inputs[1].value, inputs[1].nonce)
         ];
-        if (inputCommitments[0] == inputCommitments[1]) revert DuplicateInput();
-        _checkSpendable(inputCommitments[0]);
-        _checkSpendable(inputCommitments[1]);
+        uint256[2] memory inputNullifiers = [
+            computeNullifier(inputCommitments[0], sk),
+            computeNullifier(inputCommitments[1], sk)
+        ];
+        if (inputNullifiers[0] == inputNullifiers[1]) revert DuplicateInput();
+        _checkSpendable(inputCommitments[0], inputNullifiers[0]);
+        _checkSpendable(inputCommitments[1], inputNullifiers[1]);
 
         for (uint256 i = 0; i < 2; ++i) {
             outputCommitments[i] = computeCommitment(
@@ -191,7 +201,7 @@ contract ShieldedPool {
 
         // 2. State changes
         for (uint256 i = 0; i < 2; ++i) {
-            _spendNote(inputCommitments[i]);
+            _revealNullifier(inputNullifiers[i]);
         }
         for (uint256 i = 0; i < 2; ++i) {
             _createNote(outputCommitments[i], outputs[i].pk, outputs[i].value, outputs[i].nonce);
@@ -207,10 +217,11 @@ contract ShieldedPool {
         // 1. Checks
         if (receiver == address(0)) revert ZeroAddress();
         uint256 commitment = computeCommitment(derivePublicKey(sk), amount, nonce);
-        _checkSpendable(commitment);
+        uint256 nullifier = computeNullifier(commitment, sk);
+        _checkSpendable(commitment, nullifier);
 
         // 2. State changes
-        _spendNote(commitment);
+        _revealNullifier(nullifier);
 
         // 3. Transfer
         TOKEN.safeTransfer(receiver, amount);
@@ -223,12 +234,20 @@ contract ShieldedPool {
     /// @param sk Secret key, must be non-zero and smaller than FIELD_SIZE
     /// @return The public key
     function derivePublicKey(uint256 sk) public pure returns (uint256) {
-        // 0 is rejected because it is the typical value of an uninitialized key:
-        // anyone can compute its public key and spend its notes.
-        // Poseidon reduces its inputs modulo FIELD_SIZE: without the upper bound,
-        // sk and sk + FIELD_SIZE would give the same public key
-        if (sk == 0 || sk > FIELD_SIZE - 1) revert InvalidSecretKey();
+        _checkSecretKey(sk);
         return PoseidonT3.hash([DS_SK, sk]);
+    }
+
+    /// @notice Returns the nullifier of a note: nf = Poseidon(DS_NF, cm, sk)
+    /// @dev Only the owner of the note, who knows sk, can compute it.
+    ///      `commitment` is expected to come from `computeCommitment`, which always
+    ///      returns a field element.
+    /// @param commitment Commitment of the note
+    /// @param sk Secret key owning the note, must be non-zero and smaller than FIELD_SIZE
+    /// @return The nullifier
+    function computeNullifier(uint256 commitment, uint256 sk) public pure returns (uint256) {
+        _checkSecretKey(sk);
+        return PoseidonT4.hash([DS_NF, commitment, sk]);
     }
 
     /// @notice Returns the commitment of a note: cm = Poseidon(DS_CMT, pk, value, nonce)
@@ -250,11 +269,22 @@ contract ShieldedPool {
         return PoseidonT5.hash([DS_CMT, pk, value, nonce]);
     }
 
-    /// @notice Reverts unless a note with this commitment exists and is unspent
+    /// @notice Reverts unless `sk` is a non-zero field element
+    /// @param sk Secret key to check
+    function _checkSecretKey(uint256 sk) private pure {
+        // 0 is rejected because it is the typical value of an uninitialized key:
+        // anyone can compute its public key and spend its notes.
+        // Poseidon reduces its inputs modulo FIELD_SIZE: without the upper bound,
+        // sk and sk + FIELD_SIZE would give the same public key and nullifiers
+        if (sk == 0 || sk > FIELD_SIZE - 1) revert InvalidSecretKey();
+    }
+
+    /// @notice Reverts unless the note exists and its nullifier has never been revealed
     /// @param commitment Commitment of the note
-    function _checkSpendable(uint256 commitment) private view {
+    /// @param nullifier Nullifier of the note
+    function _checkSpendable(uint256 commitment, uint256 nullifier) private view {
         if (!commitments[commitment]) revert UnknownNote();
-        if (spentCommitments[commitment]) revert AlreadySpent();
+        if (nullifiers[nullifier]) revert AlreadySpent();
     }
 
     /// @notice Stores a new note's commitment
@@ -267,10 +297,10 @@ contract ShieldedPool {
         emit NoteCreated(commitment, pk, value, nonce);
     }
 
-    /// @notice Marks a note as spent
-    /// @param commitment Commitment of the note
-    function _spendNote(uint256 commitment) private {
-        spentCommitments[commitment] = true;
-        emit NoteSpent(commitment);
+    /// @notice Marks a note as spent by revealing its nullifier
+    /// @param nullifier Nullifier of the note
+    function _revealNullifier(uint256 nullifier) private {
+        nullifiers[nullifier] = true;
+        emit NullifierRevealed(nullifier);
     }
 }
