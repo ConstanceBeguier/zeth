@@ -10,12 +10,12 @@ import {PoseidonT5} from "poseidon-solidity/PoseidonT5.sol";
 /// @title ShieldedPool
 /// @author Constance Beguier
 /// @notice Pool of notes for a single ERC-20 token.
-/// @dev A note (pk, value, nonce) is identified by its commitment
-///      cm = Poseidon(DS_CMT, pk, value, nonce), where pk = Poseidon(DS_SK, sk) is the
+/// @dev A note (pk, amount, nonce) is identified by its commitment
+///      cm = Poseidon(DS_CMT, pk, amount, nonce), where pk = Poseidon(DS_SK, sk) is the
 ///      owner's public key. Spending a note requires its secret key sk and reveals its
 ///      nullifier nf = Poseidon(DS_NF, cm, sk). A nullifier can only be revealed once,
 ///      which prevents spending a note twice.
-///      WARNING: for now sk, value and nonce are revealed in the transaction, so anyone
+///      WARNING: for now sk, amount and nonce are revealed in the transaction, so anyone
 ///      who sees them (e.g. in the mempool) can spend all the notes of that key. The ZK
 ///      proofs will remove this. The Merkle tree will also be added.
 ///
@@ -23,25 +23,25 @@ import {PoseidonT5} from "poseidon-solidity/PoseidonT5.sol";
 ///      - fee-on-transfer tokens: rejected by `shield`, which checks the amount received;
 ///      - tokens that can enable a fee later (e.g. USDT) or whose balances change without
 ///        a transfer (rebasing tokens such as stETH): the pool could end up holding less
-///        than the total value of its notes, and the last notes could not be unshielded;
+///        than the total amount of its notes, and the last notes could not be unshielded;
 ///      - tokens with transfer hooks (ERC-777).
 contract ShieldedPool {
     using SafeERC20 for IERC20;
 
     /// @notice A note, to create or to spend
     /// @param pk Public key of the owner
-    /// @param value Value of the note (0 is allowed, except for a shield)
+    /// @param amount Amount of the note (0 is allowed, except for a shield)
     /// @param nonce Random nonce, makes the commitment unique. It will also make the
     ///              commitment hiding once notes are encrypted: for now `NoteCreated`
     ///              publishes the nonce, so the commitment hides nothing
     struct Note {
         uint256 pk;
-        uint256 value;
+        uint256 amount;
         uint256 nonce;
     }
 
-    /// @notice Largest allowed note value (2^64 - 1)
-    uint256 public constant MAX_VALUE = type(uint64).max;
+    /// @notice Largest allowed note amount (2^64 - 1)
+    uint256 public constant MAX_AMOUNT = type(uint64).max;
 
     /// @notice Order of the BN254 scalar field: keys and nonces must be smaller than this
     uint256 public constant FIELD_SIZE =
@@ -71,9 +71,14 @@ contract ShieldedPool {
     /// @notice Emitted when a note is created
     /// @param commitment Commitment of the new note
     /// @param pk Public key of the owner of the new note
-    /// @param value Value of the new note
+    /// @param amount Amount of the new note
     /// @param nonce Nonce of the new note
-    event NoteCreated(uint256 indexed commitment, uint256 indexed pk, uint256 value, uint256 nonce);
+    event NoteCreated(
+        uint256 indexed commitment,
+        uint256 indexed pk,
+        uint256 amount,
+        uint256 nonce
+    );
 
     /// @notice Emitted when a note is spent
     /// @param nullifier Nullifier of the spent note
@@ -98,11 +103,11 @@ contract ShieldedPool {
     error InvalidSecretKey();
     /// @notice The nonce is not smaller than FIELD_SIZE
     error InvalidNonce();
-    /// @notice The value is greater than MAX_VALUE, or 0 for a shield
-    error InvalidValue();
+    /// @notice The amount is greater than MAX_AMOUNT, or 0 for a shield
+    error InvalidAmount();
     /// @notice The secret key does not match the note's public key
     error NotOwner();
-    /// @notice No note has this commitment (wrong public key, value or nonce)
+    /// @notice No note has this commitment (wrong public key, amount or nonce)
     error UnknownNote();
     /// @notice The note has already been spent: its nullifier was already revealed
     error AlreadySpent();
@@ -122,33 +127,33 @@ contract ShieldedPool {
         TOKEN = token;
     }
 
-    /// @notice Deposits `note.value` tokens and creates `note`
-    /// @dev The caller must have approved the pool for `note.value` tokens
+    /// @notice Deposits `note.amount` tokens and creates `note`
+    /// @dev The caller must have approved the pool for `note.amount` tokens
     /// @param note The note to create
     /// @return commitment Commitment of the new note
     function shield(Note calldata note) external returns (uint256 commitment) {
         // 1. Checks
-        if (note.value == 0) revert InvalidValue();
-        commitment = computeCommitment(note.pk, note.value, note.nonce);
+        if (note.amount == 0) revert InvalidAmount();
+        commitment = computeCommitment(note.pk, note.amount, note.nonce);
         if (commitments[commitment]) revert DuplicateCommitment();
 
         // 2. State changes
         _createNote(commitment, note);
 
-        // 3. Transfer, then check that the pool received exactly `note.value`
+        // 3. Transfer, then check that the pool received exactly `note.amount`
         uint256 balanceBefore = TOKEN.balanceOf(address(this));
-        TOKEN.safeTransferFrom(msg.sender, address(this), note.value);
+        TOKEN.safeTransferFrom(msg.sender, address(this), note.amount);
         // Compared with an addition, not a subtraction: if the balance went down,
         // `balanceAfter - balanceBefore` would underflow and revert with Panic(0x11)
         uint256 balanceAfter = TOKEN.balanceOf(address(this));
-        if (balanceAfter != balanceBefore + note.value) revert UnsupportedToken();
+        if (balanceAfter != balanceBefore + note.amount) revert UnsupportedToken();
 
         // 4. Emit events
-        emit Shielded(msg.sender, note.pk, note.value);
+        emit Shielded(msg.sender, note.pk, note.amount);
     }
 
     /// @notice Spends two notes owned by the same key and creates two new notes of the
-    ///         same total value
+    ///         same total amount
     /// @param sk Secret key owning both input notes (revealed, see the contract's warning)
     /// @param inputs The two notes to spend, both owned by `sk`
     /// @param outputs The two notes to create
@@ -168,15 +173,15 @@ contract ShieldedPool {
         for (uint256 i = 0; i < 2; ++i) {
             outputCommitments[i] = computeCommitment(
                 outputs[i].pk,
-                outputs[i].value,
+                outputs[i].amount,
                 outputs[i].nonce
             );
             if (commitments[outputCommitments[i]]) revert DuplicateCommitment();
         }
         if (outputCommitments[0] == outputCommitments[1]) revert DuplicateCommitment();
 
-        // Values are at most 2^64 - 1 (checked by computeCommitment): no overflow
-        if (inputs[0].value + inputs[1].value != outputs[0].value + outputs[1].value) {
+        // Amounts are at most 2^64 - 1 (checked by computeCommitment): no overflow
+        if (inputs[0].amount + inputs[1].amount != outputs[0].amount + outputs[1].amount) {
             revert UnbalancedTransfer();
         }
 
@@ -188,7 +193,7 @@ contract ShieldedPool {
         }
     }
 
-    /// @notice Spends `note` and sends its whole value to `receiver`
+    /// @notice Spends `note` and sends its whole amount to `receiver`
     /// @param sk Secret key owning the note (revealed, see the contract's warning)
     /// @param note The note to spend
     /// @param receiver Address receiving the tokens
@@ -202,10 +207,10 @@ contract ShieldedPool {
         _revealNullifier(nullifier);
 
         // 3. Transfer
-        TOKEN.safeTransfer(receiver, note.value);
+        TOKEN.safeTransfer(receiver, note.amount);
 
         // 4. Emit events
-        emit Unshielded(receiver, note.value);
+        emit Unshielded(receiver, note.amount);
     }
 
     /// @notice Returns the public key of a secret key: pk = Poseidon(DS_SK, sk)
@@ -228,23 +233,23 @@ contract ShieldedPool {
         return PoseidonT4.hash([DS_NF, commitment, sk]);
     }
 
-    /// @notice Returns the commitment of a note: cm = Poseidon(DS_CMT, pk, value, nonce)
+    /// @notice Returns the commitment of a note: cm = Poseidon(DS_CMT, pk, amount, nonce)
     /// @dev Every field is checked first. Poseidon reduces its inputs modulo FIELD_SIZE,
-    ///      so without these checks a note of value v could be spent as a note of value
-    ///      v + FIELD_SIZE (same commitment), creating tokens out of nothing.
+    ///      so without these checks a note of amount a could be spent as a note of amount
+    ///      a + FIELD_SIZE (same commitment), creating tokens out of nothing.
     /// @param pk Public key of the owner, must be non-zero and smaller than FIELD_SIZE
-    /// @param value Value of the note, must be at most MAX_VALUE
+    /// @param amount Amount of the note, must be at most MAX_AMOUNT
     /// @param nonce Nonce of the note, must be smaller than FIELD_SIZE
     /// @return The commitment
     function computeCommitment(
         uint256 pk,
-        uint256 value,
+        uint256 amount,
         uint256 nonce
     ) public pure returns (uint256) {
         if (pk == 0 || pk > FIELD_SIZE - 1) revert InvalidPublicKey();
-        if (value > MAX_VALUE) revert InvalidValue();
+        if (amount > MAX_AMOUNT) revert InvalidAmount();
         if (nonce > FIELD_SIZE - 1) revert InvalidNonce();
-        return PoseidonT5.hash([DS_CMT, pk, value, nonce]);
+        return PoseidonT5.hash([DS_CMT, pk, amount, nonce]);
     }
 
     /// @notice Reverts unless `sk` is a non-zero field element
@@ -268,7 +273,7 @@ contract ShieldedPool {
         Note calldata note
     ) private pure returns (uint256 commitment, uint256 nullifier) {
         if (derivePublicKey(sk) != note.pk) revert NotOwner();
-        commitment = computeCommitment(note.pk, note.value, note.nonce);
+        commitment = computeCommitment(note.pk, note.amount, note.nonce);
         nullifier = computeNullifier(commitment, sk);
     }
 
@@ -285,7 +290,7 @@ contract ShieldedPool {
     /// @param note The note
     function _createNote(uint256 commitment, Note calldata note) private {
         commitments[commitment] = true;
-        emit NoteCreated(commitment, note.pk, note.value, note.nonce);
+        emit NoteCreated(commitment, note.pk, note.amount, note.nonce);
     }
 
     /// @notice Marks a note as spent by revealing its nullifier
