@@ -1,16 +1,28 @@
-# Sample Hardhat 3 Project (`mocha` and `ethers`)
+# Zeth backend
 
-This project showcases a Hardhat 3 project using `mocha` for tests and the `ethers` library for Ethereum interactions.
+Smart contracts of Zeth, built with Hardhat 3. Tests use `mocha` and ethers.js.
 
-To learn more about Hardhat 3, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3](https://hardhat.org/hardhat3-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+## ShieldedPool
 
-## Project Overview
+`ShieldedPool` holds a single ERC-20 token and keeps track of **notes**. A note is a tuple `(pk, value, nonce)`:
 
-This example project includes:
+- `pk = Poseidon(DS_SK, sk)` is the owner's public key, derived from a secret key `sk`.
+- `value` is an amount of tokens, at most `2^64 - 1`.
+- `nonce` is a random number that makes each note unique.
 
-- A simple Hardhat configuration file.
-- TypeScript tests using `mocha` and ethers.js (there are no Solidity tests).
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
+The contract only stores the **commitment** of each note, `cm = Poseidon(DS_CMT, pk, value, nonce)`, and whether it has been spent.
+
+| Function                                | What it does                                                                  |
+| --------------------------------------- | ----------------------------------------------------------------------------- |
+| `shield(pk, value, nonce)`              | Deposits `value` tokens and creates a note for `pk`.                          |
+| `privateTransfer(sk, inputs, outputs)`  | Spends two notes owned by `sk` and creates two notes of the same total value. |
+| `unshield(sk, nonce, receiver, amount)` | Spends a note and sends its whole value to `receiver`.                        |
+
+> **⚠️ Work in progress:** for now, spending a note reveals `sk`, `value` and `nonce` in the transaction. Anyone who sees them can spend all the notes of that key. Zero-knowledge proofs will remove this.
+
+### Poseidon libraries
+
+Poseidon hashes come from [`poseidon-solidity`](https://github.com/vimwitch/poseidon-solidity). `PoseidonT3` (2 inputs) and `PoseidonT5` (4 inputs) are external libraries: they are too large to be copied into `ShieldedPool`, so each one is deployed on its own and linked to the pool at deployment. They are listed in `npmFilesToBuild` in `hardhat.config.ts` so that Hardhat compiles them.
 
 ## Supported tokens
 
@@ -32,7 +44,7 @@ npx hardhat test
 
 ### Make a deployment to Sepolia
 
-This project includes an Ignition module, `ignition/modules/ShieldedPool.ts`, that deploys a test token (`MockERC20`, mintable by anyone) and a `ShieldedPool` for it. The same module is used locally and on Sepolia.
+This project includes an Ignition module, `ignition/modules/ShieldedPool.ts`, that deploys a test token (`MockERC20`, mintable by anyone), the Poseidon libraries and a `ShieldedPool` linked to them. The same module is used locally and on Sepolia.
 
 To run the deployment to a local chain:
 
