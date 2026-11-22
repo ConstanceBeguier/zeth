@@ -297,6 +297,13 @@ describe("ShieldedPool", function () {
       for (const commitment of outputCommitments) {
         expect(await pool.commitments(commitment)).to.equal(true);
       }
+      // The new notes are not spent: their nullifiers are not revealed
+      expect(
+        await pool.nullifiers(await nullifierOf(outputs[0], BOB_SK)),
+      ).to.equal(false);
+      expect(
+        await pool.nullifiers(await nullifierOf(outputs[1], ALICE_SK)),
+      ).to.equal(false);
     });
 
     it("Should allow an output of amount 0", async function () {
@@ -348,6 +355,21 @@ describe("ShieldedPool", function () {
             { pk: bobPk, amount: 0n, nonce: 4n },
           ],
           BOB_SK,
+        ),
+      ).to.be.revertedWithCustomError(pool, "NotOwner");
+    });
+
+    it("Should revert if the secret key owns the first input but not the second", async function () {
+      const bobNote = { pk: bobPk, amount: 40n, nonce: 5n };
+      await pool.connect(bob).shield(bobNote);
+
+      await expect(
+        transfer(
+          [aliceNotes[0], bobNote],
+          [
+            { pk: alicePk, amount: 100n, nonce: 3n },
+            { pk: alicePk, amount: 0n, nonce: 4n },
+          ],
         ),
       ).to.be.revertedWithCustomError(pool, "NotOwner");
     });
@@ -478,12 +500,30 @@ describe("ShieldedPool", function () {
       ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
     });
 
-    it("Should revert if an output already exists, even if spent", async function () {
-      // The output is the note being spent: its commitment already exists
+    it("Should revert if an output is one of the inputs", async function () {
+      // The output is a note being spent: its commitment already exists
       await expect(
         transfer(aliceNotes, [
           aliceNotes[0],
           { pk: alicePk, amount: 40n, nonce: 3n },
+        ]),
+      ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
+    });
+
+    it("Should revert if an output is a note spent in an earlier transaction", async function () {
+      // Spends Alice's two notes, creating notes of 100 and 0
+      const change: [Note, Note] = [
+        { pk: alicePk, amount: 100n, nonce: 3n },
+        { pk: alicePk, amount: 0n, nonce: 4n },
+      ];
+      await transfer(aliceNotes, change);
+
+      // aliceNotes[0] is spent, but its commitment still exists: it can never
+      // be created again
+      await expect(
+        transfer(change, [
+          aliceNotes[0],
+          { pk: alicePk, amount: 40n, nonce: 5n },
         ]),
       ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
     });

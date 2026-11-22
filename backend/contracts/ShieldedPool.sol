@@ -43,7 +43,8 @@ contract ShieldedPool {
     /// @notice Largest allowed note amount (2^64 - 1)
     uint256 public constant MAX_AMOUNT = type(uint64).max;
 
-    /// @notice Order of the BN254 scalar field: keys and nonces must be smaller than this
+    /// @notice Order of the BN254 scalar field: keys, nonces and commitments must be
+    ///         smaller than this
     uint256 public constant FIELD_SIZE =
         21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
@@ -105,6 +106,8 @@ contract ShieldedPool {
     error InvalidSecretKey();
     /// @notice The nonce is not smaller than FIELD_SIZE
     error InvalidNonce();
+    /// @notice The commitment is not smaller than FIELD_SIZE
+    error InvalidCommitment();
     /// @notice The amount is greater than MAX_AMOUNT, or 0 for a shield
     error InvalidAmount();
     /// @notice The secret key does not match the note's public key
@@ -225,12 +228,13 @@ contract ShieldedPool {
 
     /// @notice Returns the nullifier of a note: nf = Poseidon(DS_NF, cm, sk)
     /// @dev Only the owner of the note, who knows sk, can compute it.
-    ///      `commitment` is expected to come from `computeCommitment`, which always
-    ///      returns a field element.
-    /// @param commitment Commitment of the note
+    ///      Poseidon reduces its inputs modulo FIELD_SIZE: without the commitment check,
+    ///      cm and cm + FIELD_SIZE would give the same nullifier.
+    /// @param commitment Commitment of the note, must be smaller than FIELD_SIZE
     /// @param sk Secret key owning the note, must be non-zero and smaller than FIELD_SIZE
     /// @return The nullifier
     function computeNullifier(uint256 commitment, uint256 sk) public pure returns (uint256) {
+        if (commitment > FIELD_SIZE - 1) revert InvalidCommitment();
         _checkSecretKey(sk);
         return PoseidonT4.hash([DS_NF, commitment, sk]);
     }

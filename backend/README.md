@@ -28,12 +28,14 @@ The contract only stores the **commitment** of each note, `cm = Poseidon(DS_CMT,
 
 ### Events
 
-| Event                                        | Emitted by       | Use                                                                                             |
-| -------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------- |
-| `NoteCreated(commitment, pk, amount, nonce)` | every new note   | Lets the owner find the notes sent to their `pk` (indexed) and everything needed to spend them. |
-| `NullifierRevealed(nullifier)`               | every spent note | Lets the owner check whether one of their notes has been spent.                                 |
-| `Shielded(from, pk, amount, nonce)`          | `shield`         | A deposit, with the full note.                                                                  |
-| `Unshielded(to, amount)`                     | `unshield`       | A withdrawal.                                                                                   |
+| Event                                        | Emitted by       | Use                                                                                                                     |
+| -------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `NoteCreated(commitment, pk, amount, nonce)` | every new note   | Lets the owner find the notes sent to their `pk` (indexed), with everything they need to spend them besides their `sk`. |
+| `NullifierRevealed(nullifier)`               | every spent note | Lets the owner check whether one of their notes has been spent.                                                         |
+| `Shielded(from, pk, amount, nonce)`          | `shield`         | A deposit, with the note's fields (the commitment is in `NoteCreated`).                                                 |
+| `Unshielded(to, amount)`                     | `unshield`       | A withdrawal.                                                                                                           |
+
+To check whether a note has been spent, compute its nullifier and look for it in `NullifierRevealed` events (or in the `nullifiers` mapping). This requires `sk`. For now, `sk` is revealed by the first spend of any of its notes: from then on, anyone can compute the nullifiers of all the notes of that key and see which ones are spent. Once zero-knowledge proofs hide `sk`, only the owner of a note will be able to link it to its nullifier.
 
 ### Poseidon libraries
 
