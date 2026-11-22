@@ -36,7 +36,9 @@ contract ShieldedPool {
     /// @notice A note to create
     /// @param pk Public key of the owner
     /// @param value Value of the note (0 is allowed)
-    /// @param nonce Random nonce, makes the commitment unique and hiding
+    /// @param nonce Random nonce, makes the commitment unique. It will also make the
+    ///              commitment hiding once notes are encrypted: for now `NoteCreated`
+    ///              publishes the nonce, so the commitment hides nothing
     struct OutputNote {
         uint256 pk;
         uint256 value;
@@ -94,7 +96,7 @@ contract ShieldedPool {
     error ZeroAddress();
     /// @notice The public key is 0 or not smaller than FIELD_SIZE
     error InvalidPublicKey();
-    /// @notice The secret key is not smaller than FIELD_SIZE
+    /// @notice The secret key is 0 or not smaller than FIELD_SIZE
     error InvalidSecretKey();
     /// @notice The nonce is not smaller than FIELD_SIZE
     error InvalidNonce();
@@ -168,9 +170,9 @@ contract ShieldedPool {
             computeCommitment(pk, inputs[0].value, inputs[0].nonce),
             computeCommitment(pk, inputs[1].value, inputs[1].nonce)
         ];
+        if (inputCommitments[0] == inputCommitments[1]) revert DuplicateInput();
         _checkSpendable(inputCommitments[0]);
         _checkSpendable(inputCommitments[1]);
-        if (inputCommitments[0] == inputCommitments[1]) revert DuplicateInput();
 
         for (uint256 i = 0; i < 2; ++i) {
             outputCommitments[i] = computeCommitment(
@@ -218,12 +220,14 @@ contract ShieldedPool {
     }
 
     /// @notice Returns the public key of a secret key: pk = Poseidon(DS_SK, sk)
-    /// @param sk Secret key, must be smaller than FIELD_SIZE
+    /// @param sk Secret key, must be non-zero and smaller than FIELD_SIZE
     /// @return The public key
     function derivePublicKey(uint256 sk) public pure returns (uint256) {
-        // Poseidon reduces its inputs modulo FIELD_SIZE: without this check,
+        // 0 is rejected because it is the typical value of an uninitialized key:
+        // anyone can compute its public key and spend its notes.
+        // Poseidon reduces its inputs modulo FIELD_SIZE: without the upper bound,
         // sk and sk + FIELD_SIZE would give the same public key
-        if (sk > FIELD_SIZE - 1) revert InvalidSecretKey();
+        if (sk == 0 || sk > FIELD_SIZE - 1) revert InvalidSecretKey();
         return PoseidonT3.hash([DS_SK, sk]);
     }
 

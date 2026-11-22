@@ -72,6 +72,13 @@ describe("ShieldedPool", function () {
       expect(alicePk).to.not.equal(bobPk);
     });
 
+    it("Should revert if the secret key is 0", async function () {
+      await expect(pool.derivePublicKey(0n)).to.be.revertedWithCustomError(
+        pool,
+        "InvalidSecretKey",
+      );
+    });
+
     it("Should revert if the secret key is not smaller than the field size", async function () {
       await expect(
         pool.derivePublicKey(FIELD_SIZE),
@@ -316,7 +323,9 @@ describe("ShieldedPool", function () {
 
     it("Should revert if an input value is not a valid value", async function () {
       // 60 + FIELD_SIZE has the same commitment as 60 (Poseidon works modulo
-      // FIELD_SIZE): without the value check, this would create tokens
+      // FIELD_SIZE): the value check must reject it. Here it could not create
+      // tokens anyway (outputs are at most 2^64 - 1, so the transfer could not
+      // balance); the dangerous case is unshield, tested below
       await expect(
         transfer(
           [{ value: 60n + FIELD_SIZE, nonce: 1n }, ALICE_NOTES[1]],
@@ -350,6 +359,76 @@ describe("ShieldedPool", function () {
           ],
         ),
       ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
+    });
+
+    it("Should revert if the secret key is not smaller than the field size", async function () {
+      await expect(
+        transfer(
+          [ALICE_NOTES[0], ALICE_NOTES[1]],
+          [
+            { pk: bobPk, value: 100n, nonce: 3n },
+            { pk: bobPk, value: 0n, nonce: 4n },
+          ],
+          FIELD_SIZE,
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
+    });
+
+    it("Should revert if an output public key is not smaller than the field size", async function () {
+      await expect(
+        transfer(
+          [ALICE_NOTES[0], ALICE_NOTES[1]],
+          [
+            { pk: FIELD_SIZE, value: 100n, nonce: 3n },
+            { pk: bobPk, value: 0n, nonce: 4n },
+          ],
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
+    });
+
+    it("Should revert if an output nonce is not smaller than the field size", async function () {
+      await expect(
+        transfer(
+          [ALICE_NOTES[0], ALICE_NOTES[1]],
+          [
+            { pk: bobPk, value: 100n, nonce: FIELD_SIZE },
+            { pk: bobPk, value: 0n, nonce: 4n },
+          ],
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidNonce");
+    });
+
+    it("Should revert if an input nonce is not smaller than the field size", async function () {
+      // 1 + FIELD_SIZE has the same commitment as 1 (Poseidon works modulo FIELD_SIZE)
+      await expect(
+        transfer(
+          [{ value: 60n, nonce: 1n + FIELD_SIZE }, ALICE_NOTES[1]],
+          [
+            { pk: bobPk, value: 100n, nonce: 3n },
+            { pk: bobPk, value: 0n, nonce: 4n },
+          ],
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidNonce");
+    });
+
+    it("Should revert with DuplicateInput when the same spent note is used twice", async function () {
+      await transfer(
+        [ALICE_NOTES[0], ALICE_NOTES[1]],
+        [
+          { pk: alicePk, value: 100n, nonce: 3n },
+          { pk: alicePk, value: 0n, nonce: 4n },
+        ],
+      );
+
+      await expect(
+        transfer(
+          [ALICE_NOTES[0], ALICE_NOTES[0]],
+          [
+            { pk: bobPk, value: 120n, nonce: 5n },
+            { pk: bobPk, value: 0n, nonce: 6n },
+          ],
+        ),
+      ).to.be.revertedWithCustomError(pool, "DuplicateInput");
     });
 
     it("Should revert if the two outputs are the same note", async function () {
@@ -455,6 +534,26 @@ describe("ShieldedPool", function () {
       await expect(
         pool.unshield(ALICE_SK, 1n, alice.address, 50n),
       ).to.be.revertedWithCustomError(pool, "UnknownNote");
+    });
+
+    it("Should revert if the secret key is not smaller than the field size", async function () {
+      await expect(
+        pool.unshield(FIELD_SIZE, 1n, alice.address, 100n),
+      ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
+    });
+
+    it("Should revert if the nonce is not smaller than the field size", async function () {
+      // 1 + FIELD_SIZE has the same commitment as 1 (Poseidon works modulo FIELD_SIZE)
+      await expect(
+        pool.unshield(ALICE_SK, 1n + FIELD_SIZE, alice.address, 100n),
+      ).to.be.revertedWithCustomError(pool, "InvalidNonce");
+    });
+
+    it("Should revert if the amount is greater than 2^64 - 1", async function () {
+      // 100 + FIELD_SIZE has the same commitment as 100
+      await expect(
+        pool.unshield(ALICE_SK, 1n, alice.address, 100n + FIELD_SIZE),
+      ).to.be.revertedWithCustomError(pool, "InvalidValue");
     });
 
     it("Should revert if the receiver is the zero address", async function () {

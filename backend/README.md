@@ -20,9 +20,15 @@ The contract only stores the **commitment** of each note, `cm = Poseidon(DS_CMT,
 
 > **⚠️ Work in progress:** for now, spending a note reveals `sk`, `value` and `nonce` in the transaction. Anyone who sees them can spend all the notes of that key. Zero-knowledge proofs will remove this.
 
+> **Compute `pk` locally.** `derivePublicKey(sk)` is a public function of the contract, but a client must never call it through an RPC node: the call would send `sk` to the node provider, even without a transaction. Clients should compute `pk = Poseidon(DS_SK, sk)` locally with a JavaScript Poseidon implementation. The tests call `derivePublicKey` only because they run on a local Hardhat network.
+
+> **Shields can be front-run.** A pending `shield(pk, value, nonce)` is visible in the mempool. Anyone can send the same call first: the victim's transaction then reverts with `DuplicateCommitment`. The attacker gains nothing, since they pay the deposit themselves and the note goes to the victim's `pk`. The victim only has to retry with a new nonce. This stays true once zero-knowledge proofs are added, because shields are public by design.
+>
+> For now, a pending `privateTransfer` can be blocked the same way: its outputs `(pk, value, nonce)` are visible, so anyone can `shield` one of them first. This will disappear with zero-knowledge proofs, since outputs will only be commitments.
+
 ### Poseidon libraries
 
-Poseidon hashes come from [`poseidon-solidity`](https://github.com/vimwitch/poseidon-solidity). `PoseidonT3` (2 inputs) and `PoseidonT5` (4 inputs) are external libraries: they are too large to be copied into `ShieldedPool`, so each one is deployed on its own and linked to the pool at deployment. They are listed in `npmFilesToBuild` in `hardhat.config.ts` so that Hardhat compiles them.
+Poseidon hashes come from [`poseidon-solidity`](https://github.com/vimwitch/poseidon-solidity). `PoseidonT3` (2 inputs) and `PoseidonT5` (4 inputs) are external libraries: they are too large to be copied into `ShieldedPool`, so each one is deployed on its own and linked to the pool at deployment. They are listed in `npmFilesToBuild` in `hardhat.config.ts` so that Hardhat compiles them, together with `PoseidonT4` (3 inputs), which is not used yet and will compute nullifiers.
 
 ## Supported tokens
 
