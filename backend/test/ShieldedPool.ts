@@ -9,7 +9,7 @@ import type {
 
 const { ethers } = await network.create();
 
-const MAX_VALUE = 2n ** 64n - 1n;
+const MAX_AMOUNT = 2n ** 64n - 1n;
 const FIELD_SIZE =
   21888242871839275222246405745257275088548364400416034343698204186575808495617n;
 
@@ -17,16 +17,16 @@ const FIELD_SIZE =
 const ALICE_SK = 111n;
 const BOB_SK = 222n;
 
+type Note = { pk: bigint; amount: bigint; nonce: bigint };
+
 // Deploys the Poseidon libraries and a pool for `tokenAddress`, linked to them
 async function deployPool(tokenAddress: string): Promise<ShieldedPool> {
-  const poseidonT3 = await ethers.deployContract("PoseidonT3");
-  const poseidonT5 = await ethers.deployContract("PoseidonT5");
-  return ethers.deployContract("ShieldedPool", [tokenAddress], {
-    libraries: {
-      PoseidonT3: await poseidonT3.getAddress(),
-      PoseidonT5: await poseidonT5.getAddress(),
-    },
-  });
+  const libraries: Record<string, string> = {};
+  for (const name of ["PoseidonT3", "PoseidonT4", "PoseidonT5"]) {
+    const library = await ethers.deployContract(name);
+    libraries[name] = await library.getAddress();
+  }
+  return ethers.deployContract("ShieldedPool", [tokenAddress], { libraries });
 }
 
 describe("ShieldedPool", function () {
@@ -55,6 +55,14 @@ describe("ShieldedPool", function () {
     bobPk = await pool.derivePublicKey(BOB_SK);
   });
 
+  // Commitment and nullifier of `note`, spent with `sk`
+  async function commitmentOf(note: Note) {
+    return pool.computeCommitment(note.pk, note.amount, note.nonce);
+  }
+  async function nullifierOf(note: Note, sk: bigint) {
+    return pool.computeNullifier(await commitmentOf(note), sk);
+  }
+
   describe("deployment", function () {
     it("Should store the token address", async function () {
       expect(await pool.TOKEN()).to.equal(await token.getAddress());
@@ -67,7 +75,7 @@ describe("ShieldedPool", function () {
     });
   });
 
-  describe("keys", function () {
+  describe("keys and nullifiers", function () {
     it("Should give different public keys to different secret keys", async function () {
       expect(alicePk).to.not.equal(bobPk);
     });
@@ -84,19 +92,73 @@ describe("ShieldedPool", function () {
         pool.derivePublicKey(FIELD_SIZE),
       ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
     });
+
+    it("Should give a nullifier different from the commitment", async function () {
+      const note = { pk: alicePk, amount: 100n, nonce: 1n };
+
+      expect(await nullifierOf(note, ALICE_SK)).to.not.equal(
+        await commitmentOf(note),
+      );
+    });
+
+    it("Should give different nullifiers to different notes", async function () {
+      expect(
+        await nullifierOf({ pk: alicePk, amount: 100n, nonce: 1n }, ALICE_SK),
+      ).to.not.equal(
+        await nullifierOf({ pk: alicePk, amount: 100n, nonce: 2n }, ALICE_SK),
+      );
+    });
+
+    it("Should revert if the nullifier's secret key is 0", async function () {
+      const commitment = await commitmentOf({
+        pk: alicePk,
+        amount: 100n,
+        nonce: 1n,
+      });
+
+      await expect(
+        pool.computeNullifier(commitment, 0n),
+      ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
+    });
+
+    it("Should revert if the nullifier's secret key is not smaller than the field size", async function () {
+      const commitment = await commitmentOf({
+        pk: alicePk,
+        amount: 100n,
+        nonce: 1n,
+      });
+
+      await expect(
+        pool.computeNullifier(commitment, FIELD_SIZE),
+      ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
+    });
+
+    it("Should revert if the commitment is not smaller than the field size", async function () {
+      // cm + FIELD_SIZE would give the same nullifier as cm
+      const commitment = await commitmentOf({
+        pk: alicePk,
+        amount: 100n,
+        nonce: 1n,
+      });
+
+      await expect(
+        pool.computeNullifier(commitment + FIELD_SIZE, ALICE_SK),
+      ).to.be.revertedWithCustomError(pool, "InvalidCommitment");
+    });
   });
 
   describe("shield", function () {
     it("Should create a note, move the tokens and emit events", async function () {
-      const commitment = await pool.computeCommitment(bobPk, 100n, 1n);
+      const note = { pk: bobPk, amount: 100n, nonce: 1n };
+      const commitment = await commitmentOf(note);
 
-      const tx = pool.connect(alice).shield(bobPk, 100n, 1n);
+      const tx = pool.connect(alice).shield(note);
 
       await expect(tx)
         .to.emit(pool, "NoteCreated")
         .withArgs(commitment, bobPk, 100n, 1n)
         .and.to.emit(pool, "Shielded")
-        .withArgs(alice.address, bobPk, 100n);
+        .withArgs(alice.address, bobPk, 100n, 1n);
       await expect(tx).to.changeTokenBalances(
         ethers,
         token,
@@ -105,46 +167,48 @@ describe("ShieldedPool", function () {
       );
 
       expect(await pool.commitments(commitment)).to.equal(true);
-      expect(await pool.spentCommitments(commitment)).to.equal(false);
+      expect(await pool.nullifiers(await nullifierOf(note, BOB_SK))).to.equal(
+        false,
+      );
     });
 
     it("Should revert if the same note is shielded twice", async function () {
-      await pool.shield(alicePk, 100n, 1n);
+      const note = { pk: alicePk, amount: 100n, nonce: 1n };
+      await pool.shield(note);
 
-      await expect(
-        pool.shield(alicePk, 100n, 1n),
-      ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
-    });
-
-    it("Should revert if the value is 0", async function () {
-      await expect(pool.shield(alicePk, 0n, 1n)).to.be.revertedWithCustomError(
+      await expect(pool.shield(note)).to.be.revertedWithCustomError(
         pool,
-        "InvalidValue",
+        "DuplicateCommitment",
       );
     });
 
-    it("Should revert if the value is greater than 2^64 - 1", async function () {
+    it("Should revert if the amount is 0", async function () {
       await expect(
-        pool.shield(alicePk, MAX_VALUE + 1n, 1n),
-      ).to.be.revertedWithCustomError(pool, "InvalidValue");
+        pool.shield({ pk: alicePk, amount: 0n, nonce: 1n }),
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
+    });
+
+    it("Should revert if the amount is greater than 2^64 - 1", async function () {
+      await expect(
+        pool.shield({ pk: alicePk, amount: MAX_AMOUNT + 1n, nonce: 1n }),
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
     });
 
     it("Should revert if the public key is 0", async function () {
-      await expect(pool.shield(0n, 100n, 1n)).to.be.revertedWithCustomError(
-        pool,
-        "InvalidPublicKey",
-      );
+      await expect(
+        pool.shield({ pk: 0n, amount: 100n, nonce: 1n }),
+      ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
     });
 
     it("Should revert if the public key is not smaller than the field size", async function () {
       await expect(
-        pool.shield(FIELD_SIZE, 100n, 1n),
+        pool.shield({ pk: FIELD_SIZE, amount: 100n, nonce: 1n }),
       ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
     });
 
     it("Should revert if the nonce is not smaller than the field size", async function () {
       await expect(
-        pool.shield(alicePk, 100n, FIELD_SIZE),
+        pool.shield({ pk: alicePk, amount: 100n, nonce: FIELD_SIZE }),
       ).to.be.revertedWithCustomError(pool, "InvalidNonce");
     });
 
@@ -154,7 +218,7 @@ describe("ShieldedPool", function () {
       await token.mint(alice.address, 1000n);
 
       await expect(
-        pool.shield(alicePk, 1001n, 1n),
+        pool.shield({ pk: alicePk, amount: 1001n, nonce: 1n }),
       ).to.be.revertedWithCustomError(token, "ERC20InsufficientAllowance");
     });
 
@@ -165,58 +229,56 @@ describe("ShieldedPool", function () {
       await feeToken.approve(await feePool.getAddress(), 1000n);
 
       await expect(
-        feePool.shield(alicePk, 100n, 1n),
+        feePool.shield({ pk: alicePk, amount: 100n, nonce: 1n }),
       ).to.be.revertedWithCustomError(feePool, "UnsupportedToken");
     });
   });
 
   describe("privateTransfer", function () {
     // Alice owns two notes: 60 tokens (nonce 1) and 40 tokens (nonce 2)
-    const ALICE_NOTES = [
-      { value: 60n, nonce: 1n },
-      { value: 40n, nonce: 2n },
-    ];
+    let aliceNotes: [Note, Note];
 
     beforeEach(async function () {
-      for (const note of ALICE_NOTES) {
-        await pool.shield(alicePk, note.value, note.nonce);
+      aliceNotes = [
+        { pk: alicePk, amount: 60n, nonce: 1n },
+        { pk: alicePk, amount: 40n, nonce: 2n },
+      ];
+      for (const note of aliceNotes) {
+        await pool.shield(note);
       }
     });
-
-    type Input = { value: bigint; nonce: bigint };
-    type Output = { pk: bigint; value: bigint; nonce: bigint };
 
     // Spends `inputs` with Alice's secret key (unless `sk` is given) and
     // creates `outputs`
     function transfer(
-      inputs: [Input, Input],
-      outputs: [Output, Output],
+      inputs: [Note, Note],
+      outputs: [Note, Note],
       sk = ALICE_SK,
     ) {
       return pool.privateTransfer(sk, inputs, outputs);
     }
 
     it("Should spend the inputs, create the outputs and emit events", async function () {
-      const outputs: [Output, Output] = [
-        { pk: bobPk, value: 70n, nonce: 3n },
-        { pk: alicePk, value: 30n, nonce: 4n },
+      const outputs: [Note, Note] = [
+        { pk: bobPk, amount: 70n, nonce: 3n },
+        { pk: alicePk, amount: 30n, nonce: 4n },
       ];
-      const inputCommitments = [
-        await pool.computeCommitment(alicePk, 60n, 1n),
-        await pool.computeCommitment(alicePk, 40n, 2n),
+      const inputNullifiers = [
+        await nullifierOf(aliceNotes[0], ALICE_SK),
+        await nullifierOf(aliceNotes[1], ALICE_SK),
       ];
       const outputCommitments = [
-        await pool.computeCommitment(bobPk, 70n, 3n),
-        await pool.computeCommitment(alicePk, 30n, 4n),
+        await commitmentOf(outputs[0]),
+        await commitmentOf(outputs[1]),
       ];
 
-      const tx = transfer([ALICE_NOTES[0], ALICE_NOTES[1]], outputs);
+      const tx = transfer(aliceNotes, outputs);
 
       await expect(tx)
-        .to.emit(pool, "NoteSpent")
-        .withArgs(inputCommitments[0])
-        .and.to.emit(pool, "NoteSpent")
-        .withArgs(inputCommitments[1])
+        .to.emit(pool, "NullifierRevealed")
+        .withArgs(inputNullifiers[0])
+        .and.to.emit(pool, "NullifierRevealed")
+        .withArgs(inputNullifiers[1])
         .and.to.emit(pool, "NoteCreated")
         .withArgs(outputCommitments[0], bobPk, 70n, 3n)
         .and.to.emit(pool, "NoteCreated")
@@ -229,81 +291,93 @@ describe("ShieldedPool", function () {
         [0n, 0n, 0n],
       );
 
-      for (const commitment of inputCommitments) {
-        expect(await pool.spentCommitments(commitment)).to.equal(true);
+      for (const nullifier of inputNullifiers) {
+        expect(await pool.nullifiers(nullifier)).to.equal(true);
       }
       for (const commitment of outputCommitments) {
         expect(await pool.commitments(commitment)).to.equal(true);
-        expect(await pool.spentCommitments(commitment)).to.equal(false);
       }
     });
 
-    it("Should allow an output of value 0", async function () {
-      await transfer(
-        [ALICE_NOTES[0], ALICE_NOTES[1]],
-        [
-          { pk: bobPk, value: 100n, nonce: 3n },
-          { pk: alicePk, value: 0n, nonce: 4n },
-        ],
-      );
+    it("Should allow an output of amount 0", async function () {
+      const zero = { pk: alicePk, amount: 0n, nonce: 4n };
 
-      const commitment = await pool.computeCommitment(alicePk, 0n, 4n);
-      expect(await pool.commitments(commitment)).to.equal(true);
+      await transfer(aliceNotes, [
+        { pk: bobPk, amount: 100n, nonce: 3n },
+        zero,
+      ]);
+
+      expect(await pool.commitments(await commitmentOf(zero))).to.equal(true);
     });
 
     it("Should revert if the same note is used twice", async function () {
       await expect(
         transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[0]],
+          [aliceNotes[0], aliceNotes[0]],
           [
-            { pk: bobPk, value: 60n, nonce: 3n },
-            { pk: bobPk, value: 60n, nonce: 4n },
+            { pk: bobPk, amount: 60n, nonce: 3n },
+            { pk: bobPk, amount: 60n, nonce: 4n },
           ],
         ),
       ).to.be.revertedWithCustomError(pool, "DuplicateInput");
     });
 
-    it("Should revert with the wrong secret key", async function () {
+    it("Should revert with DuplicateInput when the same spent note is used twice", async function () {
+      await transfer(aliceNotes, [
+        { pk: alicePk, amount: 100n, nonce: 3n },
+        { pk: alicePk, amount: 0n, nonce: 4n },
+      ]);
+
       await expect(
         transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
+          [aliceNotes[0], aliceNotes[0]],
           [
-            { pk: bobPk, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
+            { pk: bobPk, amount: 120n, nonce: 5n },
+            { pk: bobPk, amount: 0n, nonce: 6n },
+          ],
+        ),
+      ).to.be.revertedWithCustomError(pool, "DuplicateInput");
+    });
+
+    it("Should revert if the secret key does not own an input", async function () {
+      await expect(
+        transfer(
+          aliceNotes,
+          [
+            { pk: bobPk, amount: 100n, nonce: 3n },
+            { pk: bobPk, amount: 0n, nonce: 4n },
           ],
           BOB_SK,
         ),
-      ).to.be.revertedWithCustomError(pool, "UnknownNote");
+      ).to.be.revertedWithCustomError(pool, "NotOwner");
     });
 
     it("Should revert if an input does not exist", async function () {
       // Alice has no note of 60 tokens with nonce 99
       await expect(
         transfer(
-          [{ value: 60n, nonce: 99n }, ALICE_NOTES[1]],
+          [{ pk: alicePk, amount: 60n, nonce: 99n }, aliceNotes[1]],
           [
-            { pk: bobPk, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
+            { pk: bobPk, amount: 100n, nonce: 3n },
+            { pk: bobPk, amount: 0n, nonce: 4n },
           ],
         ),
       ).to.be.revertedWithCustomError(pool, "UnknownNote");
     });
 
     it("Should revert if an input is already spent", async function () {
-      await transfer(
-        [ALICE_NOTES[0], ALICE_NOTES[1]],
-        [
-          { pk: alicePk, value: 100n, nonce: 3n },
-          { pk: alicePk, value: 0n, nonce: 4n },
-        ],
-      );
+      const change = { pk: alicePk, amount: 100n, nonce: 3n };
+      await transfer(aliceNotes, [
+        change,
+        { pk: alicePk, amount: 0n, nonce: 4n },
+      ]);
 
       await expect(
         transfer(
-          [ALICE_NOTES[0], { value: 100n, nonce: 3n }],
+          [aliceNotes[0], change],
           [
-            { pk: bobPk, value: 160n, nonce: 5n },
-            { pk: bobPk, value: 0n, nonce: 6n },
+            { pk: bobPk, amount: 160n, nonce: 5n },
+            { pk: bobPk, amount: 0n, nonce: 6n },
           ],
         ),
       ).to.be.revertedWithCustomError(pool, "AlreadySpent");
@@ -311,166 +385,127 @@ describe("ShieldedPool", function () {
 
     it("Should revert if inputs and outputs are not balanced", async function () {
       await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: bobPk, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 1n, nonce: 4n },
-          ],
-        ),
+        transfer(aliceNotes, [
+          { pk: bobPk, amount: 100n, nonce: 3n },
+          { pk: bobPk, amount: 1n, nonce: 4n },
+        ]),
       ).to.be.revertedWithCustomError(pool, "UnbalancedTransfer");
     });
 
-    it("Should revert if an input value is not a valid value", async function () {
+    it("Should revert if an input amount is not a valid amount", async function () {
       // 60 + FIELD_SIZE has the same commitment as 60 (Poseidon works modulo
-      // FIELD_SIZE): the value check must reject it. Here it could not create
+      // FIELD_SIZE): the amount check must reject it. Here it could not create
       // tokens anyway (outputs are at most 2^64 - 1, so the transfer could not
       // balance); the dangerous case is unshield, tested below
       await expect(
         transfer(
-          [{ value: 60n + FIELD_SIZE, nonce: 1n }, ALICE_NOTES[1]],
+          [{ pk: alicePk, amount: 60n + FIELD_SIZE, nonce: 1n }, aliceNotes[1]],
           [
-            { pk: bobPk, value: MAX_VALUE, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
+            { pk: bobPk, amount: MAX_AMOUNT, nonce: 3n },
+            { pk: bobPk, amount: 0n, nonce: 4n },
           ],
         ),
-      ).to.be.revertedWithCustomError(pool, "InvalidValue");
-    });
-
-    it("Should revert if an output value is greater than 2^64 - 1", async function () {
-      await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: bobPk, value: MAX_VALUE + 1n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
-          ],
-        ),
-      ).to.be.revertedWithCustomError(pool, "InvalidValue");
-    });
-
-    it("Should revert if an output public key is 0", async function () {
-      await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: 0n, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
-          ],
-        ),
-      ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
-    });
-
-    it("Should revert if the secret key is not smaller than the field size", async function () {
-      await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: bobPk, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
-          ],
-          FIELD_SIZE,
-        ),
-      ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
-    });
-
-    it("Should revert if an output public key is not smaller than the field size", async function () {
-      await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: FIELD_SIZE, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
-          ],
-        ),
-      ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
-    });
-
-    it("Should revert if an output nonce is not smaller than the field size", async function () {
-      await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: bobPk, value: 100n, nonce: FIELD_SIZE },
-            { pk: bobPk, value: 0n, nonce: 4n },
-          ],
-        ),
-      ).to.be.revertedWithCustomError(pool, "InvalidNonce");
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
     });
 
     it("Should revert if an input nonce is not smaller than the field size", async function () {
       // 1 + FIELD_SIZE has the same commitment as 1 (Poseidon works modulo FIELD_SIZE)
       await expect(
         transfer(
-          [{ value: 60n, nonce: 1n + FIELD_SIZE }, ALICE_NOTES[1]],
+          [{ pk: alicePk, amount: 60n, nonce: 1n + FIELD_SIZE }, aliceNotes[1]],
           [
-            { pk: bobPk, value: 100n, nonce: 3n },
-            { pk: bobPk, value: 0n, nonce: 4n },
+            { pk: bobPk, amount: 100n, nonce: 3n },
+            { pk: bobPk, amount: 0n, nonce: 4n },
           ],
         ),
       ).to.be.revertedWithCustomError(pool, "InvalidNonce");
     });
 
-    it("Should revert with DuplicateInput when the same spent note is used twice", async function () {
-      await transfer(
-        [ALICE_NOTES[0], ALICE_NOTES[1]],
-        [
-          { pk: alicePk, value: 100n, nonce: 3n },
-          { pk: alicePk, value: 0n, nonce: 4n },
-        ],
-      );
-
+    it("Should revert if the secret key is not smaller than the field size", async function () {
       await expect(
         transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[0]],
+          aliceNotes,
           [
-            { pk: bobPk, value: 120n, nonce: 5n },
-            { pk: bobPk, value: 0n, nonce: 6n },
+            { pk: bobPk, amount: 100n, nonce: 3n },
+            { pk: bobPk, amount: 0n, nonce: 4n },
           ],
+          FIELD_SIZE,
         ),
-      ).to.be.revertedWithCustomError(pool, "DuplicateInput");
+      ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
+    });
+
+    it("Should revert if an output amount is greater than 2^64 - 1", async function () {
+      await expect(
+        transfer(aliceNotes, [
+          { pk: bobPk, amount: MAX_AMOUNT + 1n, nonce: 3n },
+          { pk: bobPk, amount: 0n, nonce: 4n },
+        ]),
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
+    });
+
+    it("Should revert if an output public key is 0", async function () {
+      await expect(
+        transfer(aliceNotes, [
+          { pk: 0n, amount: 100n, nonce: 3n },
+          { pk: bobPk, amount: 0n, nonce: 4n },
+        ]),
+      ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
+    });
+
+    it("Should revert if an output public key is not smaller than the field size", async function () {
+      await expect(
+        transfer(aliceNotes, [
+          { pk: FIELD_SIZE, amount: 100n, nonce: 3n },
+          { pk: bobPk, amount: 0n, nonce: 4n },
+        ]),
+      ).to.be.revertedWithCustomError(pool, "InvalidPublicKey");
+    });
+
+    it("Should revert if an output nonce is not smaller than the field size", async function () {
+      await expect(
+        transfer(aliceNotes, [
+          { pk: bobPk, amount: 100n, nonce: FIELD_SIZE },
+          { pk: bobPk, amount: 0n, nonce: 4n },
+        ]),
+      ).to.be.revertedWithCustomError(pool, "InvalidNonce");
     });
 
     it("Should revert if the two outputs are the same note", async function () {
+      const output = { pk: bobPk, amount: 50n, nonce: 3n };
+
       await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: bobPk, value: 50n, nonce: 3n },
-            { pk: bobPk, value: 50n, nonce: 3n },
-          ],
-        ),
+        transfer(aliceNotes, [output, output]),
       ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
     });
 
     it("Should revert if an output already exists, even if spent", async function () {
       // The output is the note being spent: its commitment already exists
       await expect(
-        transfer(
-          [ALICE_NOTES[0], ALICE_NOTES[1]],
-          [
-            { pk: alicePk, value: 60n, nonce: 1n },
-            { pk: alicePk, value: 40n, nonce: 3n },
-          ],
-        ),
+        transfer(aliceNotes, [
+          aliceNotes[0],
+          { pk: alicePk, amount: 40n, nonce: 3n },
+        ]),
       ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
     });
   });
 
   describe("unshield", function () {
     // Alice owns a note of 100 tokens (nonce 1)
+    let aliceNote: Note;
+
     beforeEach(async function () {
-      await pool.shield(alicePk, 100n, 1n);
+      aliceNote = { pk: alicePk, amount: 100n, nonce: 1n };
+      await pool.shield(aliceNote);
     });
 
-    it("Should send the note's value to the receiver and emit events", async function () {
-      const commitment = await pool.computeCommitment(alicePk, 100n, 1n);
+    it("Should send the note's amount to the receiver and emit events", async function () {
+      const nullifier = await nullifierOf(aliceNote, ALICE_SK);
 
-      const tx = pool.unshield(ALICE_SK, 1n, carol.address, 100n);
+      const tx = pool.unshield(ALICE_SK, aliceNote, carol.address);
 
       await expect(tx)
-        .to.emit(pool, "NoteSpent")
-        .withArgs(commitment)
+        .to.emit(pool, "NullifierRevealed")
+        .withArgs(nullifier)
         .and.to.emit(pool, "Unshielded")
         .withArgs(carol.address, 100n);
       await expect(tx).to.changeTokenBalances(
@@ -480,40 +515,53 @@ describe("ShieldedPool", function () {
         [-100n, 100n],
       );
 
-      expect(await pool.spentCommitments(commitment)).to.equal(true);
+      expect(await pool.nullifiers(nullifier)).to.equal(true);
     });
 
     it("Should let anyone who knows the secret key spend the note", async function () {
       // The secret key is public for now: Bob can steal Alice's note
       await expect(
-        pool.connect(bob).unshield(ALICE_SK, 1n, bob.address, 100n),
+        pool.connect(bob).unshield(ALICE_SK, aliceNote, bob.address),
       ).to.changeTokenBalances(ethers, token, [pool, bob], [-100n, 100n]);
     });
 
     it("Should revert when unshielding the same note twice", async function () {
-      await pool.unshield(ALICE_SK, 1n, alice.address, 100n);
+      await pool.unshield(ALICE_SK, aliceNote, alice.address);
 
       await expect(
-        pool.unshield(ALICE_SK, 1n, alice.address, 100n),
+        pool.unshield(ALICE_SK, aliceNote, alice.address),
       ).to.be.revertedWithCustomError(pool, "AlreadySpent");
     });
 
-    it("Should unshield a note of value 0", async function () {
-      // Alice shields a second note, then turns both into 150 + 0
-      await pool.shield(alicePk, 50n, 2n);
+    it("Should revert when unshielding a note already spent by a transfer", async function () {
+      const other = { pk: alicePk, amount: 50n, nonce: 2n };
+      await pool.shield(other);
       await pool.privateTransfer(
         ALICE_SK,
+        [aliceNote, other],
         [
-          { value: 100n, nonce: 1n },
-          { value: 50n, nonce: 2n },
-        ],
-        [
-          { pk: alicePk, value: 150n, nonce: 3n },
-          { pk: alicePk, value: 0n, nonce: 4n },
+          { pk: bobPk, amount: 150n, nonce: 3n },
+          { pk: alicePk, amount: 0n, nonce: 4n },
         ],
       );
 
-      const tx = pool.unshield(ALICE_SK, 4n, carol.address, 0n);
+      await expect(
+        pool.unshield(ALICE_SK, aliceNote, alice.address),
+      ).to.be.revertedWithCustomError(pool, "AlreadySpent");
+    });
+
+    it("Should unshield a note of amount 0", async function () {
+      // Alice shields a second note, then turns both into 150 + 0
+      const other = { pk: alicePk, amount: 50n, nonce: 2n };
+      const zero = { pk: alicePk, amount: 0n, nonce: 4n };
+      await pool.shield(other);
+      await pool.privateTransfer(
+        ALICE_SK,
+        [aliceNote, other],
+        [{ pk: alicePk, amount: 150n, nonce: 3n }, zero],
+      );
+
+      const tx = pool.unshield(ALICE_SK, zero, carol.address);
 
       await expect(tx).to.emit(pool, "Unshielded").withArgs(carol.address, 0n);
       await expect(tx).to.changeTokenBalances(
@@ -524,41 +572,50 @@ describe("ShieldedPool", function () {
       );
     });
 
-    it("Should revert with the wrong secret key", async function () {
+    it("Should revert if the secret key does not own the note", async function () {
       await expect(
-        pool.unshield(BOB_SK, 1n, bob.address, 100n),
-      ).to.be.revertedWithCustomError(pool, "UnknownNote");
+        pool.unshield(BOB_SK, aliceNote, bob.address),
+      ).to.be.revertedWithCustomError(pool, "NotOwner");
     });
 
-    it("Should revert if the amount is not the note's value", async function () {
+    it("Should revert if the amount is not the note's amount", async function () {
       await expect(
-        pool.unshield(ALICE_SK, 1n, alice.address, 50n),
+        pool.unshield(ALICE_SK, { ...aliceNote, amount: 50n }, alice.address),
       ).to.be.revertedWithCustomError(pool, "UnknownNote");
     });
 
     it("Should revert if the secret key is not smaller than the field size", async function () {
       await expect(
-        pool.unshield(FIELD_SIZE, 1n, alice.address, 100n),
+        pool.unshield(FIELD_SIZE, aliceNote, alice.address),
       ).to.be.revertedWithCustomError(pool, "InvalidSecretKey");
     });
 
     it("Should revert if the nonce is not smaller than the field size", async function () {
       // 1 + FIELD_SIZE has the same commitment as 1 (Poseidon works modulo FIELD_SIZE)
       await expect(
-        pool.unshield(ALICE_SK, 1n + FIELD_SIZE, alice.address, 100n),
+        pool.unshield(
+          ALICE_SK,
+          { ...aliceNote, nonce: 1n + FIELD_SIZE },
+          alice.address,
+        ),
       ).to.be.revertedWithCustomError(pool, "InvalidNonce");
     });
 
     it("Should revert if the amount is greater than 2^64 - 1", async function () {
-      // 100 + FIELD_SIZE has the same commitment as 100
+      // 100 + FIELD_SIZE has the same commitment as 100: without the amount
+      // check, the pool would send 100 + FIELD_SIZE tokens
       await expect(
-        pool.unshield(ALICE_SK, 1n, alice.address, 100n + FIELD_SIZE),
-      ).to.be.revertedWithCustomError(pool, "InvalidValue");
+        pool.unshield(
+          ALICE_SK,
+          { ...aliceNote, amount: 100n + FIELD_SIZE },
+          alice.address,
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
     });
 
     it("Should revert if the receiver is the zero address", async function () {
       await expect(
-        pool.unshield(ALICE_SK, 1n, ethers.ZeroAddress, 100n),
+        pool.unshield(ALICE_SK, aliceNote, ethers.ZeroAddress),
       ).to.be.revertedWithCustomError(pool, "ZeroAddress");
     });
   });
