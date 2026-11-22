@@ -88,7 +88,9 @@ contract ShieldedPool {
     /// @param from Address the tokens come from
     /// @param pk Public key of the owner of the new note
     /// @param amount Amount of tokens deposited
-    event Shielded(address indexed from, uint256 indexed pk, uint256 amount);
+    /// @param nonce Nonce of the new note: with `pk` and `amount`, it is all the owner
+    ///              needs to spend the note
+    event Shielded(address indexed from, uint256 indexed pk, uint256 amount, uint256 nonce);
 
     /// @notice Emitted when tokens leave the pool
     /// @param to Address receiving the tokens
@@ -149,7 +151,7 @@ contract ShieldedPool {
         if (balanceAfter != balanceBefore + note.amount) revert UnsupportedToken();
 
         // 4. Emit events
-        emit Shielded(msg.sender, note.pk, note.amount);
+        emit Shielded(msg.sender, note.pk, note.amount, note.nonce);
     }
 
     /// @notice Spends two notes owned by the same key and creates two new notes of the
