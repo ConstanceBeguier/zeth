@@ -6,7 +6,14 @@ import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
 export default buildModule("ShieldedPoolModule", (m) => {
   const token = m.contract("MockERC20");
 
-  const pool = m.contract("ShieldedPool", [token]);
+  // The Poseidon libraries are external: they are deployed on their own, then
+  // linked to ShieldedPool
+  const poseidonT3 = m.library("PoseidonT3");
+  const poseidonT5 = m.library("PoseidonT5");
+
+  const pool = m.contract("ShieldedPool", [token], {
+    libraries: { PoseidonT3: poseidonT3, PoseidonT5: poseidonT5 },
+  });
 
   return { token, pool };
 });
