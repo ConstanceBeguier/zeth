@@ -9,10 +9,15 @@ export default buildModule("ShieldedPoolModule", (m) => {
   // The Poseidon libraries are external: they are deployed on their own, then
   // linked to ShieldedPool
   const poseidonT3 = m.library("PoseidonT3");
+  const poseidonT4 = m.library("PoseidonT4");
   const poseidonT5 = m.library("PoseidonT5");
 
   const pool = m.contract("ShieldedPool", [token], {
-    libraries: { PoseidonT3: poseidonT3, PoseidonT5: poseidonT5 },
+    libraries: {
+      PoseidonT3: poseidonT3,
+      PoseidonT4: poseidonT4,
+      PoseidonT5: poseidonT5,
+    },
   });
 
   return { token, pool };
