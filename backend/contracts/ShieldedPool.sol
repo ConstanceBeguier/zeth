@@ -15,9 +15,13 @@ import {PoseidonT5} from "poseidon-solidity/PoseidonT5.sol";
 ///      owner's public key. Spending a note requires its secret key sk and reveals its
 ///      nullifier nf = Poseidon(DS_NF, cm, sk). A nullifier can only be revealed once,
 ///      which prevents spending a note twice.
-///      WARNING: for now sk, amount and nonce are revealed in the transaction, so anyone
-///      who sees them (e.g. in the mempool) can spend all the notes of that key. The ZK
-///      proofs will remove this. The Merkle tree will also be added.
+///      Spending functions take the proof's public inputs and a "proof". For now, the
+///      proof is a struct holding the private inputs in clear, and the contract checks
+///      it by redoing the computations of the future circuit (`_verify...` functions).
+///      WARNING: for now sk, amount and nonce are therefore revealed in the
+///      transaction, so anyone who sees them (e.g. in the mempool) can spend all the
+///      notes of that key. Real ZK proofs will remove this. The Merkle tree will also
+///      be added.
 ///
 ///      Supported tokens: standard ERC-20 tokens only (e.g. DAI, WETH). Not supported:
 ///      - fee-on-transfer tokens: rejected by `shield`, which checks the amount received;
@@ -40,11 +44,29 @@ contract ShieldedPool {
         uint256 nonce;
     }
 
+    /// @notice Private inputs of a private transfer proof, in clear for now
+    /// @param sk Secret key owning both input notes
+    /// @param inputs The two notes to spend
+    /// @param outputs The two notes to create
+    struct PrivateTransferProof {
+        uint256 sk;
+        Note[2] inputs;
+        Note[2] outputs;
+    }
+
+    /// @notice Private inputs of an unshield proof, in clear for now
+    /// @param sk Secret key owning the note
+    /// @param note The note to spend
+    struct UnshieldProof {
+        uint256 sk;
+        Note note;
+    }
+
     /// @notice Largest allowed note amount (2^64 - 1)
     uint256 public constant MAX_AMOUNT = type(uint64).max;
 
-    /// @notice Order of the BN254 scalar field: keys, nonces and commitments must be
-    ///         smaller than this
+    /// @notice Order of the BN254 scalar field: keys, nonces, commitments and
+    ///         nullifiers must be smaller than this
     uint256 public constant FIELD_SIZE =
         21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
@@ -108,6 +130,8 @@ contract ShieldedPool {
     error InvalidNonce();
     /// @notice The commitment is not smaller than FIELD_SIZE
     error InvalidCommitment();
+    /// @notice The nullifier is not smaller than FIELD_SIZE
+    error InvalidNullifier();
     /// @notice The amount is greater than MAX_AMOUNT, or 0 for a shield
     error InvalidAmount();
     /// @notice The secret key does not match the note's public key
@@ -122,6 +146,8 @@ contract ShieldedPool {
     error DuplicateCommitment();
     /// @notice The sum of the inputs is not equal to the sum of the outputs
     error UnbalancedTransfer();
+    /// @notice The proof does not match the public inputs
+    error InvalidProof();
     /// @notice The pool did not receive exactly the shielded amount (e.g. fee-on-transfer token)
     error UnsupportedToken();
 
@@ -159,63 +185,59 @@ contract ShieldedPool {
 
     /// @notice Spends two notes owned by the same key and creates two new notes of the
     ///         same total amount
-    /// @param sk Secret key owning both input notes (revealed, see the contract's warning)
-    /// @param inputs The two notes to spend, both owned by `sk`
-    /// @param outputs The two notes to create
-    /// @return outputCommitments Commitments of the two new notes
+    /// @param inputNullifiers Nullifiers of the two notes to spend (public inputs)
+    /// @param outputCommitments Commitments of the two notes to create (public inputs)
+    /// @param proof Proof that the transfer is valid (private inputs in clear for now)
     function privateTransfer(
-        uint256 sk,
-        Note[2] calldata inputs,
-        Note[2] calldata outputs
-    ) external returns (uint256[2] memory outputCommitments) {
-        // 1. Checks
-        (uint256 commitment0, uint256 nullifier0) = _ownedNote(sk, inputs[0]);
-        (uint256 commitment1, uint256 nullifier1) = _ownedNote(sk, inputs[1]);
-        if (nullifier0 == nullifier1) revert DuplicateInput();
-        _checkSpendable(commitment0, nullifier0);
-        _checkSpendable(commitment1, nullifier1);
+        uint256[2] calldata inputNullifiers,
+        uint256[2] calldata outputCommitments,
+        PrivateTransferProof calldata proof
+    ) external {
+        // 1. Checks on the public inputs
+        _checkTransferPublicInputs(inputNullifiers, outputCommitments);
 
+        // 2. Check the proof
+        _verifyPrivateTransfer(inputNullifiers, outputCommitments, proof);
+
+        // 3. State changes
         for (uint256 i = 0; i < 2; ++i) {
-            outputCommitments[i] = computeCommitment(
-                outputs[i].pk,
-                outputs[i].amount,
-                outputs[i].nonce
-            );
-            if (commitments[outputCommitments[i]]) revert DuplicateCommitment();
+            _revealNullifier(inputNullifiers[i]);
         }
-        if (outputCommitments[0] == outputCommitments[1]) revert DuplicateCommitment();
-
-        // Amounts are at most 2^64 - 1 (checked by computeCommitment): no overflow
-        if (inputs[0].amount + inputs[1].amount != outputs[0].amount + outputs[1].amount) {
-            revert UnbalancedTransfer();
-        }
-
-        // 2. State changes
-        _revealNullifier(nullifier0);
-        _revealNullifier(nullifier1);
         for (uint256 i = 0; i < 2; ++i) {
-            _createNote(outputCommitments[i], outputs[i]);
+            // For now the output notes are published in clear (they will be encrypted)
+            _createNote(outputCommitments[i], proof.outputs[i]);
         }
     }
 
-    /// @notice Spends `note` and sends its whole amount to `receiver`
-    /// @param sk Secret key owning the note (revealed, see the contract's warning)
-    /// @param note The note to spend
-    /// @param receiver Address receiving the tokens
-    function unshield(uint256 sk, Note calldata note, address receiver) external {
-        // 1. Checks
+    /// @notice Spends a note and sends its whole amount to `receiver`
+    /// @param nullifier Nullifier of the note to spend (public input)
+    /// @param receiver Address receiving the tokens (public input)
+    /// @param amount Amount of the note, withdrawn entirely (public input)
+    /// @param proof Proof that the unshield is valid (private inputs in clear for now)
+    function unshield(
+        uint256 nullifier,
+        address receiver,
+        uint256 amount,
+        UnshieldProof calldata proof
+    ) external {
+        // 1. Checks on the public inputs (see _checkTransferPublicInputs for the
+        //    range checks)
         if (receiver == address(0)) revert ZeroAddress();
-        (uint256 commitment, uint256 nullifier) = _ownedNote(sk, note);
-        _checkSpendable(commitment, nullifier);
+        if (nullifier > FIELD_SIZE - 1) revert InvalidNullifier();
+        if (amount > MAX_AMOUNT) revert InvalidAmount();
+        if (nullifiers[nullifier]) revert AlreadySpent();
 
-        // 2. State changes
+        // 2. Check the proof
+        _verifyUnshield(nullifier, amount, proof);
+
+        // 3. State changes
         _revealNullifier(nullifier);
 
-        // 3. Transfer
-        TOKEN.safeTransfer(receiver, note.amount);
+        // 4. Transfer
+        TOKEN.safeTransfer(receiver, amount);
 
-        // 4. Emit events
-        emit Unshielded(receiver, note.amount);
+        // 5. Emit events
+        emit Unshielded(receiver, amount);
     }
 
     /// @notice Returns the public key of a secret key: pk = Poseidon(DS_SK, sk)
@@ -268,27 +290,84 @@ contract ShieldedPool {
         if (sk == 0 || sk > FIELD_SIZE - 1) revert InvalidSecretKey();
     }
 
-    /// @notice Reverts unless `sk` owns `note`, then returns the note's commitment and
-    ///         nullifier
-    /// @param sk Secret key of the spender
-    /// @param note The note to spend
-    /// @return commitment Commitment of the note
-    /// @return nullifier Nullifier of the note
-    function _ownedNote(
-        uint256 sk,
-        Note calldata note
-    ) private pure returns (uint256 commitment, uint256 nullifier) {
-        if (derivePublicKey(sk) != note.pk) revert NotOwner();
-        commitment = computeCommitment(note.pk, note.amount, note.nonce);
-        nullifier = computeNullifier(commitment, sk);
+    /// @notice Checks the public inputs of a private transfer, independently of the proof
+    /// @dev They must be field elements: a proof verifier may work modulo FIELD_SIZE,
+    ///      so nf + FIELD_SIZE could pass as nf while not being found in the
+    ///      `nullifiers` mapping, letting a note be spent twice
+    /// @param inputNullifiers Nullifiers of the notes to spend
+    /// @param outputCommitments Commitments of the notes to create
+    function _checkTransferPublicInputs(
+        uint256[2] calldata inputNullifiers,
+        uint256[2] calldata outputCommitments
+    ) private view {
+        for (uint256 i = 0; i < 2; ++i) {
+            if (inputNullifiers[i] > FIELD_SIZE - 1) revert InvalidNullifier();
+            if (outputCommitments[i] > FIELD_SIZE - 1) revert InvalidCommitment();
+        }
+        if (inputNullifiers[0] == inputNullifiers[1]) revert DuplicateInput();
+        for (uint256 i = 0; i < 2; ++i) {
+            if (nullifiers[inputNullifiers[i]]) revert AlreadySpent();
+        }
+        if (outputCommitments[0] == outputCommitments[1]) revert DuplicateCommitment();
+        for (uint256 i = 0; i < 2; ++i) {
+            if (commitments[outputCommitments[i]]) revert DuplicateCommitment();
+        }
     }
 
-    /// @notice Reverts unless the note exists and its nullifier has never been revealed
-    /// @param commitment Commitment of the note
-    /// @param nullifier Nullifier of the note
-    function _checkSpendable(uint256 commitment, uint256 nullifier) private view {
+    /// @notice Checks a private transfer proof: what the circuit will prove
+    /// @param inputNullifiers Public inputs: nullifiers of the notes to spend
+    /// @param outputCommitments Public inputs: commitments of the notes to create
+    /// @param proof Private inputs, in clear for now
+    function _verifyPrivateTransfer(
+        uint256[2] calldata inputNullifiers,
+        uint256[2] calldata outputCommitments,
+        PrivateTransferProof calldata proof
+    ) private view {
+        for (uint256 i = 0; i < 2; ++i) {
+            if (_spentNoteNullifier(proof.sk, proof.inputs[i]) != inputNullifiers[i]) {
+                revert InvalidProof();
+            }
+            Note calldata output = proof.outputs[i];
+            if (computeCommitment(output.pk, output.amount, output.nonce) != outputCommitments[i]) {
+                revert InvalidProof();
+            }
+        }
+        // Amounts are at most 2^64 - 1 (checked by computeCommitment): no overflow
+        if (
+            proof.inputs[0].amount + proof.inputs[1].amount !=
+            proof.outputs[0].amount + proof.outputs[1].amount
+        ) {
+            revert UnbalancedTransfer();
+        }
+    }
+
+    /// @notice Checks an unshield proof: what the circuit will prove
+    /// @dev The receiver is also a public input: a real proof binds it, so that nobody
+    ///      can replay the proof with another receiver. In clear it plays no role.
+    /// @param nullifier Public input: nullifier of the note to spend
+    /// @param amount Public input: amount withdrawn
+    /// @param proof Private inputs, in clear for now
+    function _verifyUnshield(
+        uint256 nullifier,
+        uint256 amount,
+        UnshieldProof calldata proof
+    ) private view {
+        if (_spentNoteNullifier(proof.sk, proof.note) != nullifier) revert InvalidProof();
+        if (proof.note.amount != amount) revert InvalidProof();
+    }
+
+    /// @notice Checks that `sk` owns `note` and that the note exists, then returns its
+    ///         nullifier
+    /// @dev The existence check stands for the Merkle membership proof, which the
+    ///      circuit will check against a Merkle root
+    /// @param sk Secret key of the spender
+    /// @param note The note to spend
+    /// @return The note's nullifier
+    function _spentNoteNullifier(uint256 sk, Note calldata note) private view returns (uint256) {
+        if (derivePublicKey(sk) != note.pk) revert NotOwner();
+        uint256 commitment = computeCommitment(note.pk, note.amount, note.nonce);
         if (!commitments[commitment]) revert UnknownNote();
-        if (nullifiers[nullifier]) revert AlreadySpent();
+        return computeNullifier(commitment, sk);
     }
 
     /// @notice Stores a new note's commitment
