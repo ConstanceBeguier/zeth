@@ -435,10 +435,10 @@ describe("ShieldedPool", function () {
     });
 
     it("Should revert if an input amount is not a valid amount", async function () {
-      // 60 + FIELD_SIZE has the same commitment as 60 (Poseidon works modulo
-      // FIELD_SIZE): the amount check must reject it. Here it could not create
-      // tokens anyway (outputs are at most 2^64 - 1, so the transfer could not
-      // balance); the dangerous case is unshield, tested below
+      // The public inputs are valid; only the proof's input amount is shifted
+      // by FIELD_SIZE. 60 + FIELD_SIZE has the same commitment as 60 (Poseidon
+      // works modulo FIELD_SIZE), so the amount check of the proof must reject
+      // it. The dangerous case is unshield, tested below
       const outputs: [Note, Note] = [
         { pk: bobPk, amount: 100n, nonce: 3n },
         { pk: bobPk, amount: 0n, nonce: 4n },
@@ -612,6 +612,99 @@ describe("ShieldedPool", function () {
     });
   });
 
+  describe("privateTransfer: public input checks do not depend on the proof", function () {
+    // With real ZK proofs, the contract alone prevents double spending, by
+    // checking the public inputs. These tests send a proof that would fail
+    // (Bob's key cannot spend Alice's notes) to show that the public input
+    // checks reject the transaction before the proof is even looked at.
+    let aliceNotes: [Note, Note];
+    let badProof: PrivateTransferProof;
+    let validNullifiers: [bigint, bigint];
+    let newCommitments: [bigint, bigint];
+
+    beforeEach(async function () {
+      aliceNotes = [
+        { pk: alicePk, amount: 60n, nonce: 1n },
+        { pk: alicePk, amount: 40n, nonce: 2n },
+      ];
+      for (const note of aliceNotes) {
+        await pool.shield(note);
+      }
+      badProof = { sk: BOB_SK, inputs: aliceNotes, outputs: aliceNotes };
+      validNullifiers = [
+        await nullifierOf(aliceNotes[0], ALICE_SK),
+        await nullifierOf(aliceNotes[1], ALICE_SK),
+      ];
+      newCommitments = [
+        await commitmentOf({ pk: bobPk, amount: 100n, nonce: 3n }),
+        await commitmentOf({ pk: bobPk, amount: 0n, nonce: 4n }),
+      ];
+    });
+
+    it("Should reject a duplicated nullifier whatever the proof", async function () {
+      await expect(
+        pool.privateTransfer(
+          [validNullifiers[0], validNullifiers[0]],
+          newCommitments,
+          badProof,
+        ),
+      ).to.be.revertedWithCustomError(pool, "DuplicateInput");
+    });
+
+    it("Should reject an already revealed nullifier whatever the proof", async function () {
+      await transfer(aliceNotes, [
+        { pk: alicePk, amount: 100n, nonce: 5n },
+        { pk: alicePk, amount: 0n, nonce: 6n },
+      ]);
+
+      await expect(
+        pool.privateTransfer(validNullifiers, newCommitments, badProof),
+      ).to.be.revertedWithCustomError(pool, "AlreadySpent");
+    });
+
+    it("Should reject two identical output commitments whatever the proof", async function () {
+      await expect(
+        pool.privateTransfer(
+          validNullifiers,
+          [newCommitments[0], newCommitments[0]],
+          badProof,
+        ),
+      ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
+    });
+
+    it("Should reject a nullifier that is not a field element whatever the proof", async function () {
+      // nf + FIELD_SIZE is not in the nullifiers mapping, but a verifier working
+      // modulo FIELD_SIZE could accept it as nf: it must be rejected
+      await expect(
+        pool.privateTransfer(
+          [validNullifiers[0] + FIELD_SIZE, validNullifiers[1]],
+          newCommitments,
+          badProof,
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidNullifier");
+    });
+
+    it("Should reject an output commitment that is not a field element whatever the proof", async function () {
+      await expect(
+        pool.privateTransfer(
+          validNullifiers,
+          [newCommitments[0] + FIELD_SIZE, newCommitments[1]],
+          badProof,
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidCommitment");
+    });
+
+    it("Should reject an existing output commitment whatever the proof", async function () {
+      await expect(
+        pool.privateTransfer(
+          validNullifiers,
+          [await commitmentOf(aliceNotes[0]), newCommitments[1]],
+          badProof,
+        ),
+      ).to.be.revertedWithCustomError(pool, "DuplicateCommitment");
+    });
+  });
+
   describe("unshield", function () {
     // Alice owns a note of 100 tokens (nonce 1)
     let aliceNote: Note;
@@ -678,6 +771,43 @@ describe("ShieldedPool", function () {
       await expect(
         unshield(aliceNote, alice.address),
       ).to.be.revertedWithCustomError(pool, "AlreadySpent");
+    });
+
+    it("Should reject an already revealed nullifier whatever the proof", async function () {
+      await unshield(aliceNote, alice.address);
+
+      // Bob's key cannot spend Alice's note: the proof would fail, but the
+      // public nullifier is rejected first
+      await expect(
+        pool.unshield(
+          await nullifierOf(aliceNote, ALICE_SK),
+          bob.address,
+          100n,
+          { sk: BOB_SK, note: aliceNote },
+        ),
+      ).to.be.revertedWithCustomError(pool, "AlreadySpent");
+    });
+
+    it("Should reject a nullifier that is not a field element whatever the proof", async function () {
+      await expect(
+        pool.unshield(
+          (await nullifierOf(aliceNote, ALICE_SK)) + FIELD_SIZE,
+          alice.address,
+          100n,
+          { sk: BOB_SK, note: aliceNote },
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidNullifier");
+    });
+
+    it("Should reject an amount greater than 2^64 - 1 whatever the proof", async function () {
+      await expect(
+        pool.unshield(
+          await nullifierOf(aliceNote, ALICE_SK),
+          alice.address,
+          MAX_AMOUNT + 1n,
+          { sk: BOB_SK, note: aliceNote },
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
     });
 
     it("Should revert when unshielding a note already spent by a transfer", async function () {
@@ -769,14 +899,28 @@ describe("ShieldedPool", function () {
       ).to.be.revertedWithCustomError(pool, "InvalidNonce");
     });
 
-    it("Should revert if the amount is greater than 2^64 - 1", async function () {
+    it("Should revert if the public amount is greater than 2^64 - 1", async function () {
       // 100 + FIELD_SIZE has the same commitment as 100: without the amount
-      // check, the pool would send 100 + FIELD_SIZE tokens
+      // check, the pool would send 100 + FIELD_SIZE tokens. The public input
+      // check rejects it before the proof is looked at
       await expect(
         pool.unshield(
           await nullifierOf(aliceNote, ALICE_SK),
           alice.address,
           100n + FIELD_SIZE,
+          { sk: ALICE_SK, note: { ...aliceNote, amount: 100n + FIELD_SIZE } },
+        ),
+      ).to.be.revertedWithCustomError(pool, "InvalidAmount");
+    });
+
+    it("Should revert if the proof's note amount is greater than 2^64 - 1", async function () {
+      // The public inputs are valid; only the proof's note amount is shifted
+      // by FIELD_SIZE: the amount check of the proof must reject it
+      await expect(
+        pool.unshield(
+          await nullifierOf(aliceNote, ALICE_SK),
+          alice.address,
+          100n,
           { sk: ALICE_SK, note: { ...aliceNote, amount: 100n + FIELD_SIZE } },
         ),
       ).to.be.revertedWithCustomError(pool, "InvalidAmount");

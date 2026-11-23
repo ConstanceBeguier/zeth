@@ -65,8 +65,8 @@ contract ShieldedPool {
     /// @notice Largest allowed note amount (2^64 - 1)
     uint256 public constant MAX_AMOUNT = type(uint64).max;
 
-    /// @notice Order of the BN254 scalar field: keys, nonces and commitments must be
-    ///         smaller than this
+    /// @notice Order of the BN254 scalar field: keys, nonces, commitments and
+    ///         nullifiers must be smaller than this
     uint256 public constant FIELD_SIZE =
         21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
@@ -130,6 +130,8 @@ contract ShieldedPool {
     error InvalidNonce();
     /// @notice The commitment is not smaller than FIELD_SIZE
     error InvalidCommitment();
+    /// @notice The nullifier is not smaller than FIELD_SIZE
+    error InvalidNullifier();
     /// @notice The amount is greater than MAX_AMOUNT, or 0 for a shield
     error InvalidAmount();
     /// @notice The secret key does not match the note's public key
@@ -192,14 +194,7 @@ contract ShieldedPool {
         PrivateTransferProof calldata proof
     ) external {
         // 1. Checks on the public inputs
-        if (inputNullifiers[0] == inputNullifiers[1]) revert DuplicateInput();
-        for (uint256 i = 0; i < 2; ++i) {
-            if (nullifiers[inputNullifiers[i]]) revert AlreadySpent();
-        }
-        if (outputCommitments[0] == outputCommitments[1]) revert DuplicateCommitment();
-        for (uint256 i = 0; i < 2; ++i) {
-            if (commitments[outputCommitments[i]]) revert DuplicateCommitment();
-        }
+        _checkTransferPublicInputs(inputNullifiers, outputCommitments);
 
         // 2. Check the proof
         _verifyPrivateTransfer(inputNullifiers, outputCommitments, proof);
@@ -225,8 +220,11 @@ contract ShieldedPool {
         uint256 amount,
         UnshieldProof calldata proof
     ) external {
-        // 1. Checks on the public inputs
+        // 1. Checks on the public inputs (see _checkTransferPublicInputs for the
+        //    range checks)
         if (receiver == address(0)) revert ZeroAddress();
+        if (nullifier > FIELD_SIZE - 1) revert InvalidNullifier();
+        if (amount > MAX_AMOUNT) revert InvalidAmount();
         if (nullifiers[nullifier]) revert AlreadySpent();
 
         // 2. Check the proof
@@ -290,6 +288,30 @@ contract ShieldedPool {
         // Poseidon reduces its inputs modulo FIELD_SIZE: without the upper bound,
         // sk and sk + FIELD_SIZE would give the same public key and nullifiers
         if (sk == 0 || sk > FIELD_SIZE - 1) revert InvalidSecretKey();
+    }
+
+    /// @notice Checks the public inputs of a private transfer, independently of the proof
+    /// @dev They must be field elements: a proof verifier may work modulo FIELD_SIZE,
+    ///      so nf + FIELD_SIZE could pass as nf while not being found in the
+    ///      `nullifiers` mapping, letting a note be spent twice
+    /// @param inputNullifiers Nullifiers of the notes to spend
+    /// @param outputCommitments Commitments of the notes to create
+    function _checkTransferPublicInputs(
+        uint256[2] calldata inputNullifiers,
+        uint256[2] calldata outputCommitments
+    ) private view {
+        for (uint256 i = 0; i < 2; ++i) {
+            if (inputNullifiers[i] > FIELD_SIZE - 1) revert InvalidNullifier();
+            if (outputCommitments[i] > FIELD_SIZE - 1) revert InvalidCommitment();
+        }
+        if (inputNullifiers[0] == inputNullifiers[1]) revert DuplicateInput();
+        for (uint256 i = 0; i < 2; ++i) {
+            if (nullifiers[inputNullifiers[i]]) revert AlreadySpent();
+        }
+        if (outputCommitments[0] == outputCommitments[1]) revert DuplicateCommitment();
+        for (uint256 i = 0; i < 2; ++i) {
+            if (commitments[outputCommitments[i]]) revert DuplicateCommitment();
+        }
     }
 
     /// @notice Checks a private transfer proof: what the circuit will prove

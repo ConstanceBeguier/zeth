@@ -20,7 +20,7 @@ The contract only stores the **commitment** of each note, `cm = Poseidon(DS_CMT,
 
 ### Public inputs and proofs
 
-The spending functions take the **public inputs** of a zero-knowledge proof (nullifiers, output commitments, amount, receiver) and a **proof**. The contract only relies on the public inputs: it checks that the nullifiers have never been revealed and that the output commitments are new, then verifies the proof, then updates its state.
+The spending functions take the **public inputs** of a zero-knowledge proof (nullifiers, output commitments, amount, receiver) and a **proof**. The contract relies on the public inputs alone to prevent double spending: it checks that they are field elements (and that the unshield amount is at most `2^64 - 1`), that the nullifiers have never been revealed and that the output commitments are new, then verifies the proof, then updates its state. For now it also reads two things from the proof: the output notes, which `NoteCreated` publishes in clear until notes are encrypted, and the spent notes, whose existence it checks until the Merkle tree is added. The range checks matter for real proofs: a verifier working modulo `p` could accept `nf + p` as `nf`, which is not in the `nullifiers` mapping, and let a note be spent twice.
 
 For now, the proof is a struct holding the **private inputs in clear**, and the contract verifies it by redoing the computations of the future circuit:
 
@@ -31,7 +31,7 @@ For now, the proof is a struct holding the **private inputs in clear**, and the 
 
 A proof that does not match the public inputs is rejected with `InvalidProof`. Once zero-knowledge proofs are added, these structs will be replaced by real proofs, checked by a verifier contract, and the existence check will become a Merkle membership proof.
 
-> **⚠️ Work in progress:** for now, the proof is in clear, so spending a note reveals `sk`, `amount` and `nonce` in the transaction. Anyone who sees them can spend all the notes of that key. Zero-knowledge proofs will remove this.
+> **⚠️ Work in progress:** for now, the proof is in clear, so spending a note reveals `sk`, `amount` and `nonce` in the transaction. Anyone who sees them can spend all the notes of that key. In the same way, a pending `unshield` can be copied with another `receiver` and sent first, since nothing binds the receiver to the proof yet. Zero-knowledge proofs will remove both problems.
 
 > **Compute keys and nullifiers locally.** `derivePublicKey(sk)` and `computeNullifier(cm, sk)` are public functions of the contract, but a client must never call them through an RPC node: the call would send `sk` to the node provider, even without a transaction. Clients should compute them locally with a JavaScript Poseidon implementation. The tests call these functions only because they run on a local Hardhat network.
 
